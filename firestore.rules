@@ -1,3 +1,9 @@
+// =============================================================================
+// RÈGLES FIRESTORE UNIFIÉES — CAR IA (PWA) + CAR-IA-APP_API (moteur/panneau)
+// Ce fichier doit rester IDENTIQUE dans les deux dépôts.
+// Source de vérité pour le déploiement : CAR-IA-APP_API
+//   firebase deploy --only firestore:rules,storage
+// =============================================================================
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -38,7 +44,10 @@ service cloud.firestore {
         && (isCreate || !('progress' in data) || data.progress == null || data.progress is int || data.progress is float || data.progress is number)
         && (isCreate || !('url' in data) || data.url == null || data.url is string)
         && (isCreate || !('completedAt' in data) || data.completedAt == null || data.completedAt is string)
-        && data.keys().size() <= 40;
+        // La PWA envoie ~33 champs à la création et le panneau/moteur en ajoute
+        // ~5 pendant le traitement : 60 laisse de la marge sans ouvrir la porte
+        // à des documents arbitrairement gros.
+        && data.keys().size() <= 60;
     }
 
     // Validation des données de presets (Entries / entries)
@@ -72,28 +81,44 @@ service cloud.firestore {
         && data.createdAt == request.time;
     }
 
-    // Règles de la collection 'exports' (Jobs de compositing de la PWA)
+    // Règles de la collection 'exports' (Jobs de compositing de la PWA).
+    // Lecture publique (le panneau écoute en temps réel sans authentification),
+    // mais toute écriture doit respecter le schéma isValidExportJob.
     match /exports/{jobId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow create: if isValidId(jobId) && isValidExportJob(incoming(), true);
+      allow update: if isValidId(jobId) && isValidExportJob(incoming(), false);
+      allow delete: if true;
     }
 
-    // Règles pour la collection 'prompts_ia'
+    // Règles pour la collection 'prompts_ia' : lecture publique, écritures
+    // bornées (id valide + taille de document limitée)
     match /prompts_ia/{promptId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow create, update: if isValidId(promptId) && incoming().keys().size() <= 30;
+      allow delete: if true;
     }
 
     // Règles pour la collection 'entries' (Minuscule)
     match /entries/{entryId} {
       allow read, get, list: if true;
       allow create, update: if isValidId(entryId) && isValidEntry(incoming());
-      allow delete: if !isSignedIn() || (resource != null && resource.data.userId == request.auth.uid);
+      // Une entrée anonyme (sans userId) reste supprimable par tous ;
+      // une entrée possédée ne peut être supprimée que par son propriétaire.
+      allow delete: if resource == null
+        || !("userId" in resource.data)
+        || (isSignedIn() && resource.data.userId == request.auth.uid);
     }
 
     // Règles pour la collection 'Entries' (Majuscule - AJOUTÉ pour résoudre l'erreur)
     match /Entries/{entryId} {
       allow read, get, list: if true;
       allow create, update: if isValidId(entryId) && isValidEntry(incoming());
-      allow delete: if !isSignedIn() || (resource != null && resource.data.userId == request.auth.uid);
+      // Une entrée anonyme (sans userId) reste supprimable par tous ;
+      // une entrée possédée ne peut être supprimée que par son propriétaire.
+      allow delete: if resource == null
+        || !("userId" in resource.data)
+        || (isSignedIn() && resource.data.userId == request.auth.uid);
     }
   }
 }

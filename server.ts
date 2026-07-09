@@ -2,13 +2,13 @@ import "dotenv/config";
 import express from "express";
 import path from "path";
 import fs from "fs";
-import { createServer as createViteServer } from "vite";
+import crypto from "crypto";
 import { GoogleGenAI } from "@google/genai";
 import { Jimp } from "jimp";
 
 // Initialize the Express router
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT || 3000);
 
 // Enable CORS middleware to support cross-origin requests from the PWA
 app.use((req, res, next) => {
@@ -25,6 +25,63 @@ app.use((req, res, next) => {
 // Increase request size limits to support passing high-definition images if needed
 app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ limit: "25mb", extended: true }));
+
+// ---------------------------------------------------------------------------
+// Security: optional shared-secret authentication + in-memory rate limiting.
+// When API_SHARED_SECRET is set, mutating/costly endpoints require the same
+// value in the "x-api-key" header (the control panel reads it from the
+// localStorage key "car_ia_api_secret"; the PWA must be configured likewise).
+// When it is not set, behaviour is unchanged (open API) so nothing breaks
+// until you opt in.
+// ---------------------------------------------------------------------------
+const API_SHARED_SECRET = process.env.API_SHARED_SECRET || "";
+
+if (!API_SHARED_SECRET) {
+  console.warn("⚠️ API_SHARED_SECRET non défini : l'API est ouverte. Définissez-le (et configurez la PWA/le panneau) pour protéger les endpoints.");
+}
+
+function isValidApiSecret(req: express.Request): boolean {
+  if (!API_SHARED_SECRET) return true; // auth disabled until a secret is configured
+  const provided = req.headers["x-api-key"];
+  if (typeof provided !== "string") return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(API_SHARED_SECRET);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function requireApiSecret(req: express.Request, res: express.Response, next: express.NextFunction) {
+  if (isValidApiSecret(req)) return next();
+  res.status(401).json({ success: false, error: "Clé API invalide ou absente (header x-api-key requis)." });
+}
+
+// Minimal per-IP/per-route rate limiter (fixed 1-minute window, no dependency)
+const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+
+function rateLimit(maxPerMinute: number) {
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const now = Date.now();
+    if (rateBuckets.size > 10000) {
+      for (const [key, bucket] of rateBuckets) {
+        if (bucket.resetAt < now) rateBuckets.delete(key);
+      }
+    }
+    // Bucket on the route prefix (not the full path) so /api/jobs/<id> variants
+    // share one counter instead of each getting a fresh bucket
+    const routePrefix = req.path.split("/").slice(0, 3).join("/");
+    const key = `${req.ip}|${req.method} ${routePrefix}`;
+    const bucket = rateBuckets.get(key);
+    if (!bucket || bucket.resetAt < now) {
+      rateBuckets.set(key, { count: 1, resetAt: now + 60_000 });
+      return next();
+    }
+    if (bucket.count >= maxPerMinute) {
+      res.setHeader("Retry-After", Math.ceil((bucket.resetAt - now) / 1000).toString());
+      return res.status(429).json({ success: false, error: "Trop de requêtes, réessayez dans une minute." });
+    }
+    bucket.count++;
+    next();
+  };
+}
 
 // Helper function to save uploaded file locally
 function saveUploadedFile(targetPath: string, content: any): string | null {
@@ -88,7 +145,16 @@ app.use("/users", express.static(path.join(process.cwd(), "uploads", "users")));
 app.use("/local_test_images", express.static(path.join(process.cwd(), "src", "local_test_images")));
 
 // Catch-all POST/PUT handler for direct storage simulation (e.g. /users/guest/references/...)
+const usersUploadLimiter = rateLimit(30);
 app.all("/users/*", (req, res, next) => {
+  if (req.method !== "POST" && req.method !== "PUT") {
+    return next();
+  }
+  if (!isValidApiSecret(req)) {
+    return res.status(401).json({ success: false, error: "Clé API invalide ou absente (header x-api-key requis)." });
+  }
+  usersUploadLimiter(req, res, next);
+}, (req, res, next) => {
   if (req.method !== "POST" && req.method !== "PUT") {
     return next();
   }
@@ -157,7 +223,7 @@ app.all("/users/*", (req, res, next) => {
 });
 
 // JSON fallback upload endpoint
-app.post("/api/upload", (req, res) => {
+app.post("/api/upload", requireApiSecret, rateLimit(30), (req, res) => {
   const { path: targetPath, dataUrl, image, file, data, filename } = req.body;
   const pathSpec = targetPath || filename || `file_${Date.now()}.png`;
   const content = dataUrl || image || file || data;
@@ -174,14 +240,30 @@ app.post("/api/upload", (req, res) => {
   }
 });
 
-// CORS proxy endpoint for PWA image download and loading
-app.get("/api/proxy", async (req, res) => {
+// CORS proxy endpoint for PWA image download and loading.
+// Restricted to Google Cloud Storage hosts to prevent SSRF abuse
+// (fetching internal endpoints like the GCP metadata server through this proxy).
+const PROXY_ALLOWED_HOSTS = new Set([
+  "firebasestorage.googleapis.com",
+  "storage.googleapis.com",
+]);
+
+app.get("/api/proxy", rateLimit(60), async (req, res) => {
   const imageUrl = req.query.url as string;
   if (!imageUrl) {
     return res.status(400).send("Missing url query parameter");
   }
+  let parsedUrl: URL;
   try {
-    const response = await fetch(imageUrl);
+    parsedUrl = new URL(imageUrl);
+  } catch {
+    return res.status(400).send("Invalid url query parameter");
+  }
+  if (parsedUrl.protocol !== "https:" || !PROXY_ALLOWED_HOSTS.has(parsedUrl.hostname)) {
+    return res.status(403).send("Proxy restricted to Firebase/Google Cloud Storage URLs");
+  }
+  try {
+    const response = await fetch(parsedUrl);
     if (!response.ok) {
       return res.status(response.status).send(`Failed to fetch image: ${response.statusText}`);
     }
@@ -223,11 +305,15 @@ function parseFirebaseStorageUrl(urlStr: string) {
 // Global cached token for Service Account
 let cachedToken: string | null = null;
 let tokenExpiry = 0;
+let tokenUnavailableUntil = 0; // negative cache: avoid re-probing the metadata server on every call when running locally
 
 async function getServiceAccountToken(): Promise<string | null> {
   const now = Date.now();
   if (cachedToken && now < tokenExpiry) {
     return cachedToken;
+  }
+  if (now < tokenUnavailableUntil) {
+    return null;
   }
   try {
     const controller = new AbortController();
@@ -252,7 +338,101 @@ async function getServiceAccountToken(): Promise<string | null> {
     // Graceful error, means we are likely running locally or metadata server is not reachable
     console.log("ℹ️ Metadata server not available. Falling back to unauthenticated download.");
   }
+  tokenUnavailableUntil = Date.now() + 60_000;
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Firestore REST helpers — used for server-side history persistence and the
+// optional job orchestrator. They authenticate with the service-account token
+// from the metadata server, so they are only active when running on Google
+// Cloud (locally every call gracefully returns null).
+// ---------------------------------------------------------------------------
+function loadFirebaseAppletConfig(): { projectId: string; databaseId: string } {
+  try {
+    const raw = fs.readFileSync(path.join(process.cwd(), "firebase-applet-config.json"), "utf-8");
+    const cfg = JSON.parse(raw);
+    return {
+      projectId: process.env.FIREBASE_PROJECT_ID || cfg.projectId,
+      databaseId: process.env.FIRESTORE_DATABASE_ID || cfg.firestoreDatabaseId || "(default)",
+    };
+  } catch {
+    return {
+      projectId: process.env.FIREBASE_PROJECT_ID || "gen-lang-client-0870404092",
+      databaseId: process.env.FIRESTORE_DATABASE_ID || "(default)",
+    };
+  }
+}
+const firestoreConfig = loadFirebaseAppletConfig();
+
+function firestoreBaseUrl(): string {
+  return `https://firestore.googleapis.com/v1/projects/${firestoreConfig.projectId}/databases/${encodeURIComponent(firestoreConfig.databaseId)}/documents`;
+}
+
+function toFirestoreValue(value: any): any {
+  if (value === null || value === undefined) return { nullValue: null };
+  if (typeof value === "string") return { stringValue: value };
+  if (typeof value === "boolean") return { booleanValue: value };
+  if (typeof value === "number") {
+    return Number.isInteger(value) ? { integerValue: String(value) } : { doubleValue: value };
+  }
+  if (Array.isArray(value)) return { arrayValue: { values: value.map(toFirestoreValue) } };
+  if (typeof value === "object") {
+    const fields: Record<string, any> = {};
+    for (const [k, v] of Object.entries(value)) fields[k] = toFirestoreValue(v);
+    return { mapValue: { fields } };
+  }
+  return { stringValue: String(value) };
+}
+
+function fromFirestoreValue(value: any): any {
+  if (!value || typeof value !== "object") return null;
+  if ("stringValue" in value) return value.stringValue;
+  if ("booleanValue" in value) return value.booleanValue;
+  if ("integerValue" in value) return Number(value.integerValue);
+  if ("doubleValue" in value) return value.doubleValue;
+  if ("nullValue" in value) return null;
+  if ("timestampValue" in value) return value.timestampValue;
+  if ("mapValue" in value) {
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries((value.mapValue && value.mapValue.fields) || {})) {
+      out[k] = fromFirestoreValue(v);
+    }
+    return out;
+  }
+  if ("arrayValue" in value) {
+    return ((value.arrayValue && value.arrayValue.values) || []).map(fromFirestoreValue);
+  }
+  return null;
+}
+
+function decodeFirestoreDoc(docObj: any): { id: string; updateTime: string; data: Record<string, any> } {
+  const data: Record<string, any> = {};
+  for (const [k, v] of Object.entries(docObj.fields || {})) {
+    data[k] = fromFirestoreValue(v);
+  }
+  return {
+    id: (docObj.name || "").split("/").pop() || "",
+    updateTime: docObj.updateTime || "",
+    data,
+  };
+}
+
+// Returns the parsed JSON response, or null when no service-account token is
+// available (i.e. running locally). Throws on HTTP errors.
+async function firestoreRequest(method: string, url: string, body?: any): Promise<any | null> {
+  const token = await getServiceAccountToken();
+  if (!token) return null;
+  const res = await fetch(url, {
+    method,
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Firestore REST ${method} ${res.status}: ${errText.slice(0, 200)}`);
+  }
+  return res.json();
 }
 
 const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-image";
@@ -314,11 +494,9 @@ async function uploadGeneratedImageToStorage(
       );
     }
 
-    // Generate a unique Firebase download token (UUID v4)
-    const downloadToken = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-      const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
-      return v.toString(16);
-    });
+    // Generate a unique Firebase download token (cryptographically random UUID v4 —
+    // this token is the only access control on the uploaded image, so it must be unguessable)
+    const downloadToken = crypto.randomUUID();
 
     // Update GCS metadata so Firebase recognises it as publicly accessible via token query param
     stepsLogs.push(`☁️ [FIREBASE-STORAGE] Association du token de téléchargement public Firebase...`);
@@ -371,7 +549,7 @@ async function uploadGeneratedImageToStorage(
 }
 
 // Download and save images as local test files
-app.post("/api/save-local", async (req, res) => {
+app.post("/api/save-local", requireApiSecret, rateLimit(10), async (req, res) => {
   const { imageA, imageB, imageC } = req.body;
   const dirPath = path.join(process.cwd(), "src", "local_test_images");
   if (!fs.existsSync(dirPath)) {
@@ -438,7 +616,7 @@ app.post("/api/save-local", async (req, res) => {
 });
 
 // Endpoint to upload a file directly to the local test images directory
-app.post("/api/upload-local", (req, res) => {
+app.post("/api/upload-local", requireApiSecret, rateLimit(20), (req, res) => {
   const { filename, base64Data } = req.body;
   if (!filename || !base64Data) {
     return res.status(400).json({ success: false, error: "Filename and base64Data are required" });
@@ -494,6 +672,48 @@ interface GenerationHistoryItem {
 
 const userGenerationsHistory: GenerationHistoryItem[] = [];
 
+// Firestore collection where the generation history is persisted (the
+// in-memory array above survives only until the Cloud Run instance restarts)
+const HISTORY_COLLECTION = "generations_history";
+
+async function persistHistoryItemToFirestore(item: GenerationHistoryItem): Promise<void> {
+  try {
+    const url = `${firestoreBaseUrl()}/${HISTORY_COLLECTION}?documentId=${encodeURIComponent(item.id)}`;
+    const encoded = toFirestoreValue(item);
+    const result = await firestoreRequest("POST", url, { fields: encoded.mapValue.fields });
+    if (result) {
+      console.log(`🗃️ Historique persisté dans Firestore : ${HISTORY_COLLECTION}/${item.id}`);
+    }
+  } catch (err) {
+    console.warn("⚠️ Échec de la persistance Firestore de l'historique :", err);
+  }
+}
+
+async function fetchHistoryFromFirestore(userId: string): Promise<GenerationHistoryItem[] | null> {
+  try {
+    const rows = await firestoreRequest("POST", `${firestoreBaseUrl()}:runQuery`, {
+      structuredQuery: {
+        from: [{ collectionId: HISTORY_COLLECTION }],
+        where: {
+          fieldFilter: {
+            field: { fieldPath: "userId" },
+            op: "EQUAL",
+            value: { stringValue: userId },
+          },
+        },
+        limit: 200,
+      },
+    });
+    if (!rows) return null;
+    return rows
+      .filter((row: any) => row.document)
+      .map((row: any) => decodeFirestoreDoc(row.document).data as GenerationHistoryItem);
+  } catch (err) {
+    console.warn("⚠️ Lecture Firestore de l'historique impossible :", err);
+    return null;
+  }
+}
+
 // Store the last API health status globally in memory
 let lastApiHealthStatus: {
   status: "unknown" | "healthy" | "unhealthy";
@@ -514,9 +734,20 @@ interface JobState {
   error?: string;
 }
 const jobsStore: Record<string, JobState> = {};
+const MAX_JOBS_IN_STORE = 200;
+
+// Prevent unbounded memory growth: evict the oldest jobs beyond the cap
+function pruneJobsStore() {
+  const keys = Object.keys(jobsStore);
+  if (keys.length > MAX_JOBS_IN_STORE) {
+    for (const key of keys.slice(0, keys.length - MAX_JOBS_IN_STORE)) {
+      delete jobsStore[key];
+    }
+  }
+}
 
 // GET /api/jobs/:jobId -> retrieve job status for local polling
-app.get("/api/jobs/:jobId", (req, res) => {
+app.get("/api/jobs/:jobId", rateLimit(120), (req, res) => {
   const { jobId } = req.params;
   const job = jobsStore[jobId];
   if (!job) {
@@ -530,7 +761,7 @@ app.get("/api/jobs/:jobId", (req, res) => {
 });
 
 // POST /api/jobs/:jobId -> update/sync job status from React app
-app.post("/api/jobs/:jobId", (req, res) => {
+app.post("/api/jobs/:jobId", requireApiSecret, rateLimit(60), (req, res) => {
   const { jobId } = req.params;
   const { status, progress, imageUrl, imageFinal, error } = req.body;
   
@@ -542,7 +773,8 @@ app.post("/api/jobs/:jobId", (req, res) => {
     imageFinal: imageFinal || jobsStore[jobId]?.imageFinal,
     error: error || jobsStore[jobId]?.error
   };
-  
+  pruneJobsStore();
+
   res.json({ success: true, job: jobsStore[jobId] });
 });
 
@@ -551,17 +783,30 @@ app.get("/api/gemini/health", (req, res) => {
   res.json({ success: true, ...lastApiHealthStatus });
 });
 
-// API Route to list generations history for any User ID
-app.get("/api/gemini/history", (req, res) => {
+// API Route to list generations history for any User ID.
+// Reads from Firestore when service-account credentials are available (data
+// survives restarts), merged with the in-memory items of the current instance.
+app.get("/api/gemini/history", requireApiSecret, rateLimit(30), async (req, res) => {
   const userId = (req.query.userId as string) || "user_test_99";
-  const userHistory = userGenerationsHistory.filter(item => item.userId === userId);
-  res.json({ success: true, history: userHistory });
+  const memoryHistory = userGenerationsHistory.filter(item => item.userId === userId);
+
+  const remoteHistory = await fetchHistoryFromFirestore(userId);
+  if (remoteHistory) {
+    const byId = new Map<string, GenerationHistoryItem>();
+    for (const item of remoteHistory) byId.set(item.id, item);
+    for (const item of memoryHistory) if (!byId.has(item.id)) byId.set(item.id, item);
+    // ids are "gen_<timestamp>" so a lexical sort gives chronological order
+    const merged = [...byId.values()].sort((a, b) => (a.id < b.id ? -1 : 1));
+    return res.json({ success: true, history: merged, source: "firestore" });
+  }
+
+  res.json({ success: true, history: memoryHistory, source: "memory" });
 });
 
 // API Route to reset / clear all generations for an isolated User ID
-app.delete("/api/gemini/reset", (req, res) => {
+app.delete("/api/gemini/reset", requireApiSecret, rateLimit(10), async (req, res) => {
   const userId = (req.query.userId as string) || "user_test_99";
-  
+
   // Find indexes to delete
   let countDeleted = 0;
   for (let i = userGenerationsHistory.length - 1; i >= 0; i--) {
@@ -571,11 +816,39 @@ app.delete("/api/gemini/reset", (req, res) => {
     }
   }
 
+  // Also delete the persisted Firestore history entries when credentials allow
+  let firestoreDeleted = 0;
+  try {
+    const rows = await firestoreRequest("POST", `${firestoreBaseUrl()}:runQuery`, {
+      structuredQuery: {
+        from: [{ collectionId: HISTORY_COLLECTION }],
+        where: {
+          fieldFilter: {
+            field: { fieldPath: "userId" },
+            op: "EQUAL",
+            value: { stringValue: userId },
+          },
+        },
+        limit: 300,
+      },
+    });
+    if (rows) {
+      for (const row of rows) {
+        if (!row.document?.name) continue;
+        await firestoreRequest("DELETE", `https://firestore.googleapis.com/v1/${row.document.name}`);
+        firestoreDeleted++;
+      }
+    }
+  } catch (err) {
+    console.warn("⚠️ Purge Firestore de l'historique impossible :", err);
+  }
+
   res.json({
     success: true,
     userId: userId,
     countDeleted: countDeleted,
-    msg: `🧹 Toutes les générations pour l'utilisateur '${userId}' ont été supprimées avec succès de Firebase Storage.`
+    firestoreDeleted: firestoreDeleted,
+    msg: `🧹 Historique purgé pour '${userId}' : ${countDeleted} en mémoire, ${firestoreDeleted} dans Firestore. Les fichiers images dans Firebase Storage ne sont pas supprimés.`
   });
 });
 
@@ -770,7 +1043,7 @@ async function flattenImageIfNeeded(
   }
 }
 // API Route for actual Gemini Generation & Inpainting Simulation
-app.post("/api/gemini/generate", async (req, res) => {
+app.post("/api/gemini/generate", requireApiSecret, rateLimit(6), async (req, res) => {
   const stepsLogs: string[] = [];
   let totalInputTokens = 0;
   let promptTokensCount = 0;
@@ -865,7 +1138,12 @@ const downloadAndEncodeImage = async (
 
   if (!targetUrl.startsWith("http://") && !targetUrl.startsWith("https://")) {
     let cleanPath = targetUrl.startsWith("/") ? targetUrl.slice(1) : targetUrl;
-    let resolvedPath = path.join(process.cwd(), cleanPath);
+    let resolvedPath = path.resolve(process.cwd(), cleanPath);
+
+    // Confine local reads to the project directory (blocks "../" traversal outside cwd)
+    if (!resolvedPath.startsWith(process.cwd() + path.sep)) {
+      throw new Error(`${name} : chemin local hors du répertoire du projet refusé.`);
+    }
 
     if (!fs.existsSync(resolvedPath)) {
       const srcPath = path.join(process.cwd(), "src", cleanPath);
@@ -1437,6 +1715,16 @@ apiResponse = await ai.models.generateContent({
 
 stepsLogs.push(`📥 [API-RESPONSE] Réponse reçue de Gemini.`);
 
+// Prefer the real token counts returned by the API over the local heuristic
+const usage: any = (apiResponse as any).usageMetadata;
+if (usage && (usage.totalTokenCount || usage.promptTokenCount)) {
+  promptTokensCount = Number(usage.promptTokenCount || promptTokensCount);
+  totalInputTokens = Number(usage.totalTokenCount || totalInputTokens);
+  imageTokensCount = Math.max(0, totalInputTokens - promptTokensCount);
+  resolvedCost = (isGemini3ProImage ? 0.040 : 0.030) + (totalInputTokens * 0.000000075);
+  stepsLogs.push(`🧮 [USAGE-METADATA] Tokens réels renvoyés par l'API : prompt=${promptTokensCount}, total=${totalInputTokens}.`);
+}
+
 // Recherche de l'image générée
 if (apiResponse.candidates?.length) {
 
@@ -1547,6 +1835,12 @@ if (!imageResult) {
   };
 
   userGenerationsHistory.push(newItem);
+  // Cap the in-memory history to avoid unbounded growth on long-running instances
+  if (userGenerationsHistory.length > 500) {
+    userGenerationsHistory.splice(0, userGenerationsHistory.length - 500);
+  }
+  // Persist to Firestore (fire-and-forget; no-op when running without SA credentials)
+  void persistHistoryItemToFirestore(newItem);
 
   if (jobId) {
     jobsStore[jobId] = {
@@ -1617,7 +1911,8 @@ function ensureLocalTestFilesExist() {
     }
 
     // 1. Search recursively for input_file_0.png, input_file_1.png, input_file_2.png
-    const dirsToSearch = ["/tmp", process.cwd(), "/var/tmp", "/"];
+    // (limited to temp dirs and the project dir — never scan the filesystem root)
+    const dirsToSearch = ["/tmp", process.cwd(), "/var/tmp"];
     const foundFiles: string[] = [];
 
     const searchDir = (dir: string, depth = 0) => {
@@ -1707,10 +2002,150 @@ function ensureLocalTestFilesExist() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Server-side job orchestrator (opt-in via SERVER_ORCHESTRATION=true).
+// Polls the Firestore `exports` collection with the service-account token and
+// processes pending jobs itself, so generations no longer depend on the
+// control-panel browser tab being open. Kept opt-in because running it at the
+// same time as the panel's client-side auto-trigger would double-process jobs
+// (and double the Gemini spend) — enable one or the other, not both.
+// ---------------------------------------------------------------------------
+const ORCHESTRATION_ENABLED = process.env.SERVER_ORCHESTRATION === "true";
+const ORCHESTRATION_POLL_MS = Math.max(5000, Number(process.env.SERVER_ORCHESTRATION_POLL_MS || 15000));
+let orchestratorBusy = false;
+
+async function claimExportJob(docId: string, updateTime: string): Promise<boolean> {
+  try {
+    // The updateTime precondition makes the claim atomic: if another worker
+    // (or the panel) touched the doc since we read it, the PATCH fails.
+    const url = `${firestoreBaseUrl()}/exports/${encodeURIComponent(docId)}`
+      + `?updateMask.fieldPaths=status&updateMask.fieldPaths=progress`
+      + `&currentDocument.updateTime=${encodeURIComponent(updateTime)}`;
+    const result = await firestoreRequest("PATCH", url, {
+      fields: {
+        status: { stringValue: "processing" },
+        progress: { integerValue: "15" },
+      },
+    });
+    return !!result;
+  } catch {
+    return false; // precondition failed -> someone else claimed the job
+  }
+}
+
+async function patchExportJob(docId: string, patch: Record<string, any>): Promise<void> {
+  const mask = Object.keys(patch)
+    .map((k) => `updateMask.fieldPaths=${encodeURIComponent(k)}`)
+    .join("&");
+  const url = `${firestoreBaseUrl()}/exports/${encodeURIComponent(docId)}?${mask}`;
+  const fields: Record<string, any> = {};
+  for (const [k, v] of Object.entries(patch)) {
+    fields[k] = toFirestoreValue(v);
+  }
+  await firestoreRequest("PATCH", url, { fields });
+}
+
+async function orchestratorTick(): Promise<void> {
+  if (orchestratorBusy) return;
+  orchestratorBusy = true;
+  try {
+    const token = await getServiceAccountToken();
+    if (!token) return; // no credentials (local run): stay idle
+
+    const rows = await firestoreRequest("POST", `${firestoreBaseUrl()}:runQuery`, {
+      structuredQuery: {
+        from: [{ collectionId: "exports" }],
+        where: {
+          fieldFilter: {
+            field: { fieldPath: "status" },
+            op: "IN",
+            value: {
+              arrayValue: {
+                values: [{ stringValue: "pending" }, { stringValue: "ready_to_generate" }],
+              },
+            },
+          },
+        },
+        limit: 3,
+      },
+    });
+    if (!rows) return;
+
+    for (const row of rows) {
+      if (!row.document) continue;
+      const { id, updateTime, data } = decodeFirestoreDoc(row.document);
+      if (!data.imageA || !data.imageB || !data.imageC) continue; // inputs not ready yet
+      if (!(await claimExportJob(id, updateTime))) continue;
+      console.log(`🤖 [ORCHESTRATOR] Job '${id}' réclamé, génération en cours...`);
+
+      try {
+        const meta = data.metadataUtilisateur || {};
+        const payload = {
+          jobId: id,
+          userId: data.userId || "user_test_99",
+          prompt: data.prompt || data.unifiedInstruction || "",
+          model: data.model,
+          aspectRatio: data.aspectRatio,
+          imageSize: data.imageSize,
+          imageA: data.imageA,
+          imageB: data.imageB,
+          imageC: data.imageC,
+          logo: data.logo || undefined,
+          metadataUtilisateur: meta,
+          presetsFond: data.presetsFond,
+          W_B: data.W_B || meta.W_B,
+          H_B: data.H_B || meta.H_B,
+          text: !!meta.texte,
+          textContent: meta.texte || "",
+          geometryGuidanceMode: data.geometryGuidanceMode,
+          coordinatePromptMode: data.coordinatePromptMode,
+        };
+
+        // Reuse the full generation pipeline by calling our own endpoint locally
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (API_SHARED_SECRET) headers["x-api-key"] = API_SHARED_SECRET;
+        const genRes = await fetch(`http://127.0.0.1:${PORT}/api/gemini/generate`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(payload),
+        });
+        const genJson: any = await genRes.json();
+
+        if (genRes.ok && genJson.success && genJson.imageUrl) {
+          await patchExportJob(id, {
+            status: "completed",
+            progress: 100,
+            imageFinal: genJson.imageUrl,
+            url: genJson.imageUrl,
+            completedAt: new Date().toISOString(),
+          });
+          console.log(`✅ [ORCHESTRATOR] Job '${id}' terminé : ${String(genJson.imageUrl).slice(0, 80)}...`);
+        } else {
+          const reason = String(genJson.apiError || `HTTP ${genRes.status}`);
+          await patchExportJob(id, { status: "failed", errorMessage5: reason });
+          console.warn(`❌ [ORCHESTRATOR] Job '${id}' en échec : ${reason}`);
+        }
+      } catch (err: any) {
+        console.error(`❌ [ORCHESTRATOR] Erreur sur le job '${id}' :`, err);
+        try {
+          await patchExportJob(id, { status: "failed", errorMessage5: err.message || String(err) });
+        } catch {
+          // job left in "processing"; it will need a manual retry
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("⚠️ [ORCHESTRATOR] Tick en échec :", err);
+  } finally {
+    orchestratorBusy = false;
+  }
+}
+
 async function startServer() {
   ensureLocalTestFilesExist();
-  // Vite middleware for development
+  // Vite middleware for development (imported lazily so the production bundle never loads Vite)
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -1727,6 +2162,10 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`🚀 Full-stack Active Server running on port ${PORT}`);
+    if (ORCHESTRATION_ENABLED) {
+      console.log(`🤖 [ORCHESTRATOR] Orchestration serveur activée (poll toutes les ${ORCHESTRATION_POLL_MS / 1000}s). Désactivez le déclenchement auto du panneau pour éviter les doubles générations.`);
+      setInterval(orchestratorTick, ORCHESTRATION_POLL_MS);
+    }
   });
 }
 

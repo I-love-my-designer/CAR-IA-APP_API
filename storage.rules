@@ -1,0 +1,86 @@
+// =============================================================================
+// RÈGLES STORAGE UNIFIÉES — CAR IA (PWA) + CAR-IA-APP_API (moteur/panneau)
+// Ce fichier doit rester IDENTIQUE dans les deux dépôts.
+// Source de vérité pour le déploiement : CAR-IA-APP_API
+//   firebase deploy --only firestore:rules,storage
+//
+// Rappel : le serveur du moteur écrit via son Service Account, qui n'est pas
+// soumis à ces règles — la génération n'est donc jamais bloquée par ce fichier.
+// =============================================================================
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Contraintes réutilisables pour les téléversements clients
+    function isReasonableImage() {
+      return request.resource != null
+        && request.resource.size < 20 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    // -------------------------------------------------------------------
+    // 1. Assets publics en lecture seule
+    // -------------------------------------------------------------------
+    // Utilisés par la PWA
+    match /ENVIRONMENTS/{allPaths=**} { allow read, list: if true; }
+    match /LOGOS/{allPaths=**} { allow read, list: if true; }
+    match /logos/{allPaths=**} { allow read, list: if true; }
+    match /MARQUES/{allPaths=**} { allow read, list: if true; }
+    match /marques/{allPaths=**} { allow read, list: if true; }
+
+    // Fallbacks alphabétiques de la PWA
+    match /A/{allPaths=**} { allow read, list: if true; }
+    match /B/{allPaths=**} { allow read, list: if true; }
+    match /C/{allPaths=**} { allow read, list: if true; }
+    match /D/{allPaths=**} { allow read, list: if true; }
+    match /E/{allPaths=**} { allow read, list: if true; }
+    match /a/{allPaths=**} { allow read, list: if true; }
+    match /b/{allPaths=**} { allow read, list: if true; }
+    match /c/{allPaths=**} { allow read, list: if true; }
+    match /d/{allPaths=**} { allow read, list: if true; }
+    match /e/{allPaths=**} { allow read, list: if true; }
+
+    // Utilisés par le panneau de contrôle / moteur (images de démo)
+    match /backgrounds/{allPaths=**} { allow read, list: if true; }
+    match /vehicles/{allPaths=**} { allow read, list: if true; }
+    match /compositions/{allPaths=**} { allow read, list: if true; }
+
+    // -------------------------------------------------------------------
+    // 2. Exports de la PWA : création publique (flux sans authentification),
+    //    jamais de modification ni suppression, taille et type bornés
+    // -------------------------------------------------------------------
+    match /exports/vehicles/{allPaths=**} {
+      allow read: if true;
+      allow create: if isReasonableImage();
+      allow update, delete: if false;
+    }
+    match /exports/references/{allPaths=**} {
+      allow read: if true;
+      allow create: if isReasonableImage();
+      allow update, delete: if false;
+    }
+    match /exports/logos/{allPaths=**} {
+      allow read: if true;
+      allow create: if isReasonableImage();
+      allow update, delete: if false;
+    }
+
+    // -------------------------------------------------------------------
+    // 3. Dossiers cloisonnés par utilisateur (références PWA + rendus du
+    //    moteur dans users/{userId}/homescreens/, écrits via Service Account)
+    // -------------------------------------------------------------------
+    match /users/{userId}/{allPaths=**} {
+      allow read: if true;
+      allow create: if isReasonableImage();
+      allow update, delete: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // -------------------------------------------------------------------
+    // 4. Défaut : tout le reste est bloqué
+    // -------------------------------------------------------------------
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

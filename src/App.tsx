@@ -40,6 +40,16 @@ import { getAuth } from "firebase/auth";
 import { getStorage, ref as storageRef, uploadString, getDownloadURL } from "firebase/storage";
 import { FirestoreJobPayload, PresetsFond } from "./types";
 import { generatePythonSnippet, generateNodeSnippet, generateCurlSnippet } from "./codeSnippets";
+import { apiFetch } from "./api";
+import {
+  FIREBASE_DEFAULTS,
+  GLOBAL_ENTRIES_DATABASE_ID,
+  DEFAULT_BUCKET_GS,
+  DEFAULT_IMAGE_A,
+  DEFAULT_IMAGE_B,
+  DEFAULT_IMAGE_C,
+  DEFAULT_LOGO,
+} from "./constants";
 import pwaConfig from "../firebase-applet-config.json";
 
 export enum OperationType {
@@ -120,7 +130,7 @@ export default function App() {
 
   const fetchApiHealth = async () => {
     try {
-      const res = await fetch("/api/gemini/health");
+      const res = await apiFetch("/api/gemini/health");
       if (res.ok) {
         const data = await res.json();
         if (data.success) {
@@ -137,14 +147,14 @@ export default function App() {
   };
 
   // Config variables representing the project settings
-  const [firebaseProjectId, setFirebaseProjectId] = useState<string>(pwaConfig?.projectId || "gen-lang-client-0870404092");
-  const [firebaseAppId, setFirebaseAppId] = useState<string>(pwaConfig?.appId || "1:172885729212:web:ab072eb63a25c3af0c95b9");
-  const [firebaseApiKey, setFirebaseApiKey] = useState<string>(pwaConfig?.apiKey || "AIzaSyBVF5JPs_yXKRlrQUK3NlAm97cDntLEz9o");
-  const [firebaseAuthDomain, setFirebaseAuthDomain] = useState<string>(pwaConfig?.authDomain || "gen-lang-client-0870404092.firebaseapp.com");
-  const [firestoreDatabaseId, setFirestoreDatabaseId] = useState<string>(pwaConfig?.firestoreDatabaseId || "ai-studio-20bb72b2-2c7c-4bdc-967b-ecd3e4f27e13");
-  const [firebaseBucketName, setFirebaseBucketName] = useState<string>(pwaConfig?.storageBucket ? `gs://${pwaConfig.storageBucket}` : "gs://gen-lang-client-0870404092.firebasestorage.app");
-  const [firebaseStorageBucket, setFirebaseStorageBucket] = useState<string>(pwaConfig?.storageBucket || "gen-lang-client-0870404092.firebasestorage.app");
-  const [messagingSenderId, setMessagingSenderId] = useState<string>(pwaConfig?.messagingSenderId || "172885729212");
+  const [firebaseProjectId, setFirebaseProjectId] = useState<string>(pwaConfig?.projectId || FIREBASE_DEFAULTS.projectId);
+  const [firebaseAppId, setFirebaseAppId] = useState<string>(pwaConfig?.appId || FIREBASE_DEFAULTS.appId);
+  const [firebaseApiKey, setFirebaseApiKey] = useState<string>(pwaConfig?.apiKey || FIREBASE_DEFAULTS.apiKey);
+  const [firebaseAuthDomain, setFirebaseAuthDomain] = useState<string>(pwaConfig?.authDomain || FIREBASE_DEFAULTS.authDomain);
+  const [firestoreDatabaseId, setFirestoreDatabaseId] = useState<string>(pwaConfig?.firestoreDatabaseId || FIREBASE_DEFAULTS.firestoreDatabaseId);
+  const [firebaseBucketName, setFirebaseBucketName] = useState<string>(pwaConfig?.storageBucket ? `gs://${pwaConfig.storageBucket}` : DEFAULT_BUCKET_GS);
+  const [firebaseStorageBucket, setFirebaseStorageBucket] = useState<string>(pwaConfig?.storageBucket || FIREBASE_DEFAULTS.storageBucket);
+  const [messagingSenderId, setMessagingSenderId] = useState<string>(pwaConfig?.messagingSenderId || FIREBASE_DEFAULTS.messagingSenderId);
   const [measurementId, setMeasurementId] = useState<string>(pwaConfig?.measurementId || "");
   const [firestoreCollection, setFirestoreCollection] = useState<string>("exports");
   const [userId, setUserId] = useState<string>("user_test_99");
@@ -152,28 +162,28 @@ export default function App() {
 
   // Raw Address Inputs for the PWA payload - No standard lists/menus of Mojave, Porsche, etc.
   const [imageA, setImageA] = useState<string>(
-    "https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0870404092.firebasestorage.app/o/backgrounds%2Fdesert_road_hd.jpg?alt=media"
+    DEFAULT_IMAGE_A
   );
   const [imageB, setImageB] = useState<string>(
-    "https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0870404092.firebasestorage.app/o/vehicles%2Fporsche_taycan_detoure.png?alt=media"
+    DEFAULT_IMAGE_B
   );
   const [imageC, setImageC] = useState<string>(
-    "https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0870404092.firebasestorage.app/o/compositions%2Freference_comp_075.jpg?alt=media"
+    DEFAULT_IMAGE_C
   );
   const [logo, setLogo] = useState<string>(
-    "https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0870404092.firebasestorage.app/o/LOGOS%2Fapex_brand_white.png?alt=media"
+    DEFAULT_LOGO
   );
 
   // --- LOCAL TEST MODE TOGGLE STATES & HANDLERS ---
   const [isLocalMode, setIsLocalMode] = useState<boolean>(false);
   const [lastFirebaseImageA, setLastFirebaseImageA] = useState<string>(
-    "https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0870404092.firebasestorage.app/o/backgrounds%2Fdesert_road_hd.jpg?alt=media"
+    DEFAULT_IMAGE_A
   );
   const [lastFirebaseImageB, setLastFirebaseImageB] = useState<string>(
-    "https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0870404092.firebasestorage.app/o/vehicles%2Fporsche_taycan_detoure.png?alt=media"
+    DEFAULT_IMAGE_B
   );
   const [lastFirebaseImageC, setLastFirebaseImageC] = useState<string>(
-    "https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0870404092.firebasestorage.app/o/compositions%2Freference_comp_075.jpg?alt=media"
+    DEFAULT_IMAGE_C
   );
   const [localCacheBuster, setLocalCacheBuster] = useState<string>(String(Date.now()));
   const [isSavingLocal, setIsSavingLocal] = useState<boolean>(false);
@@ -187,7 +197,7 @@ export default function App() {
       const base64Data = reader.result as string;
       try {
         setUploadStatus(prev => ({ ...prev, [filename]: "Envoi au serveur..." }));
-        const res = await fetch("/api/upload-local", {
+        const res = await apiFetch("/api/upload-local", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ filename, base64Data }),
@@ -249,7 +259,7 @@ export default function App() {
         imageC: isLocalMode ? lastFirebaseImageC : imageC,
       };
 
-      const res = await fetch("/api/save-local", {
+      const res = await apiFetch("/api/save-local", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -277,10 +287,10 @@ export default function App() {
   };
 
   // --- AUTOMATIC HIGH-FIDELITY FALLBACK SYSTEM FOR SANDBOX VISUALIZATION ---
-  const FALLBACK_IMAGE_A = "https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0870404092.firebasestorage.app/o/backgrounds%2Fdesert_road_hd.jpg?alt=media";
-  const FALLBACK_IMAGE_B = "https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0870404092.firebasestorage.app/o/vehicles%2Fporsche_taycan_detoure.png?alt=media";
-  const FALLBACK_IMAGE_C = "https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0870404092.firebasestorage.app/o/compositions%2Freference_comp_075.jpg?alt=media";
-  const FALLBACK_LOGO = "https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0870404092.firebasestorage.app/o/LOGOS%2Fapex_brand_white.png?alt=media";
+  const FALLBACK_IMAGE_A = DEFAULT_IMAGE_A;
+  const FALLBACK_IMAGE_B = DEFAULT_IMAGE_B;
+  const FALLBACK_IMAGE_C = DEFAULT_IMAGE_C;
+  const FALLBACK_LOGO = DEFAULT_LOGO;
 
   const [imageALoadError, setImageALoadError] = useState<boolean>(false);
   const [imageBLoadError, setImageBLoadError] = useState<boolean>(false);
@@ -483,7 +493,7 @@ low quality`);
     error?: string;
   }) => {
     if (!jobId) return;
-    fetch(`/api/jobs/${jobId}`, {
+    apiFetch(`/api/jobs/${jobId}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(updates),
@@ -905,7 +915,7 @@ Real vehicle.
 Real environment.
 Natural lighting.
 Production-quality realism.`;
-          const res = await fetch("/api/gemini/generate", {
+          const res = await apiFetch("/api/gemini/generate", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -1328,7 +1338,7 @@ Production-quality realism.`;
                               appsList[0];
     if (targetAppForGlobal) {
       try {
-        dbGlobal = getFirestore(targetAppForGlobal, "ai-studio-161890da-59e3-4b8c-988c-4938de8d8e21");
+        dbGlobal = getFirestore(targetAppForGlobal, GLOBAL_ENTRIES_DATABASE_ID);
       } catch (e) {
         console.error("Failed to load dbGlobal (ai-studio-161890da-59e3-4b8c-988c-4938de8d8e21):", e);
       }
@@ -1361,7 +1371,7 @@ Production-quality realism.`;
         const promptDocRefGlobal = doc(dbGlobal, "prompts_ia", cleanPromptId);
         getDoc(promptDocRefGlobal).then((snap) => {
           if (snap.exists()) {
-            handlePromptSnap(snap, "ai-studio-161890da-59e3-4b8c-988c-4938de8d8e21");
+            handlePromptSnap(snap, GLOBAL_ENTRIES_DATABASE_ID);
           } else if (dbToUse) {
             // fallback to dbToUse
             const promptDocRefToUse = doc(dbToUse, "prompts_ia", cleanPromptId);
@@ -1505,7 +1515,7 @@ Production-quality realism.`;
           return snap;
         }).then((snap) => {
           if (snap.exists()) {
-            handleEntriesSnap(snap, "ai-studio-161890da-59e3-4b8c-988c-4938de8d8e21");
+            handleEntriesSnap(snap, GLOBAL_ENTRIES_DATABASE_ID);
           } else {
             tryLocalEntry();
           }
@@ -1750,7 +1760,7 @@ Production-quality realism.`;
 
   const fetchUserHistory = async (targetId = userId) => {
     try {
-      const response = await fetch(`/api/gemini/history?userId=${encodeURIComponent(targetId)}`);
+      const response = await apiFetch(`/api/gemini/history?userId=${encodeURIComponent(targetId)}`);
       if (response.ok) {
         const data = await response.json();
         if (data.success && data.history) {
@@ -1767,7 +1777,7 @@ Production-quality realism.`;
       return;
     }
     try {
-      const response = await fetch(`/api/gemini/reset?userId=${encodeURIComponent(userId)}`, {
+      const response = await apiFetch(`/api/gemini/reset?userId=${encodeURIComponent(userId)}`, {
         method: "DELETE"
       });
       if (response.ok) {
@@ -1776,7 +1786,7 @@ Production-quality realism.`;
         
         // Immediate visual workspace reset
         setGeminiResultUrl("");
-        setImageC("https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0870404092.firebasestorage.app/o/compositions%2Freference_comp_075.jpg?alt=media");
+        setImageC(DEFAULT_IMAGE_C);
         setSloganText("");
         setTransformX(-2.5);
         setTransformY(14.2);
@@ -1931,7 +1941,7 @@ Production-quality realism.`;
     let resolvedOutputFilename = "";
 
     try {
-      const response = await fetch("/api/gemini/generate", {
+      const response = await apiFetch("/api/gemini/generate", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -2086,18 +2096,18 @@ Production-quality realism.`;
   };
 
   const handlesReset = () => {
-    setImageA("https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0870404092.firebasestorage.app/o/backgrounds%2Fdesert_road_hd.jpg?alt=media");
-    setImageB("https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0870404092.firebasestorage.app/o/vehicles%2Fporsche_taycan_detoure.png?alt=media");
-    setImageC("https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0870404092.firebasestorage.app/o/compositions%2Freference_comp_075.jpg?alt=media");
-    setLogo("https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0870404092.firebasestorage.app/o/LOGOS%2Fapex_brand_white.png?alt=media");
-    setFirebaseProjectId("gen-lang-client-0870404092");
-    setFirebaseAppId("1:172885729212:web:ab072eb63a25c3af0c95b9");
-    setFirebaseApiKey("AIzaSyBVF5JPs_yXKRlrQUK3NlAm97cDntLEz9o");
-    setFirebaseAuthDomain("gen-lang-client-0870404092.firebaseapp.com");
-    setFirestoreDatabaseId("ai-studio-20bb72b2-2c7c-4bdc-967b-ecd3e4f27e13");
-    setFirebaseBucketName("gs://gen-lang-client-0870404092.firebasestorage.app");
-    setFirebaseStorageBucket("gen-lang-client-0870404092.firebasestorage.app");
-    setMessagingSenderId("172885729212");
+    setImageA(DEFAULT_IMAGE_A);
+    setImageB(DEFAULT_IMAGE_B);
+    setImageC(DEFAULT_IMAGE_C);
+    setLogo(DEFAULT_LOGO);
+    setFirebaseProjectId(FIREBASE_DEFAULTS.projectId);
+    setFirebaseAppId(FIREBASE_DEFAULTS.appId);
+    setFirebaseApiKey(FIREBASE_DEFAULTS.apiKey);
+    setFirebaseAuthDomain(FIREBASE_DEFAULTS.authDomain);
+    setFirestoreDatabaseId(FIREBASE_DEFAULTS.firestoreDatabaseId);
+    setFirebaseBucketName(DEFAULT_BUCKET_GS);
+    setFirebaseStorageBucket(FIREBASE_DEFAULTS.storageBucket);
+    setMessagingSenderId(FIREBASE_DEFAULTS.messagingSenderId);
     setMeasurementId("");
     setFirestoreCollection("exports");
     setUserId("user_test_99");
@@ -2428,10 +2438,10 @@ Production-quality realism.`;
                         onClick={() => {
                           loadJobToUI({
                             id: "SIM_JOB_" + Math.random().toString(36).substring(3, 8).toUpperCase(),
-                            imageA: "https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0870404092.firebasestorage.app/o/backgrounds%2Fdesert_road_hd.jpg?alt=media",
-                            imageB: "https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0870404092.firebasestorage.app/o/vehicles%2Fporsche_taycan_detoure.png?alt=media",
-                            imageC: "https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0870404092.firebasestorage.app/o/compositions%2Freference_comp_075.jpg?alt=media",
-                            logo: "https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0870404092.firebasestorage.app/o/LOGOS%2Fapex_brand_white.png?alt=media",
+                            imageA: DEFAULT_IMAGE_A,
+                            imageB: DEFAULT_IMAGE_B,
+                            imageC: DEFAULT_IMAGE_C,
+                            logo: DEFAULT_LOGO,
                             presetsFond: {
                               logoAutorise: true,
                               texteAutorise: true,
