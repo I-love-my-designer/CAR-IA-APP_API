@@ -10,3 +10,6 @@ coverage/
 # macOS AppleDouble files (created on non-HFS volumes)
 ._*
 **/._*
+
+# Images générées localement lors des tests
+uploads/

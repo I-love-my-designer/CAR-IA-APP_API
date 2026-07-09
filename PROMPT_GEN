@@ -1,72 +1,26 @@
-Create one photorealistic automotive image from the three input images.
-IMAGE_A is the environment reference.
-Use IMAGE_A as the final background.
-Preserve its architecture, composition, framing, camera angle and perspective.
-IMAGE_B is the exact transparent PNG vehicle cutout.
-Use the exact vehicle from IMAGE_B.
-Do not replace, redesign, redraw, reinterpret or regenerate the vehicle.
-IMAGE_C is a geometry guide only.
-Use IMAGE_C only to determine vehicle position, scale and rotation.
-Do not copy its lighting, shadows, rendering style, logo appearance or text appearance.
-PRIORITY
-	1	Preserve the exact vehicle from IMAGE_B.
-	2	Preserve the environment composition from IMAGE_A.
-	3	Match the vehicle placement shown in IMAGE_C.
-	4	Improve realism only through integration.
-VEHICLE PRESERVATION
-Do not modify:
-	•	vehicle model
-	•	shape
-	•	proportions
-	•	wheels
-	•	paint color
-	•	body panels
-	•	lights
-	•	glass shape
-	•	materials
-	•	textures
-	•	existing reflections
-	•	vehicle details
-Allowed vehicle adjustments only:
-	•	global exposure
-	•	global contrast
-ENVIRONMENT
-Only adjust:
-	•	lighting
-	•	shadows
-	•	exposure
-	•	atmosphere
-INTEGRATION
-Add:
-	•	realistic contact shadows under the tires and chassis
-	•	subtle ground reflections
-	•	physically accurate grounding
-	•	coherent light direction
-	•	seamless photographic integration
-WINDOWS
-Update only the scenery visible through the vehicle windows so the environment continues naturally behind the glass.
-Preserve realistic transparency, perspective, depth and optical distortion.
+Composite ONE photorealistic image from the three inputs.
 
-NEGATIVE
-generic sports car,
-different vehicle,
-changed vehicle design,
-changed wheels,
-changed paint color,
-changed proportions,
-changed vehicle details,
-changed textures,
-different background composition,
-incorrect placement,
-fake shadows,
-floating vehicle,
-ai-generated vehicle,
-ai composite look,
-low quality
+VEHICLE LOCK - HIGHEST PRIORITY (IMAGE_B):
+Reproduce the vehicle from IMAGE_B exactly, pixel for pixel.
+Keep its exact left-right orientation and facing direction.
+NEVER mirror, flip, rotate or turn the vehicle.
+If the vehicle faces left in IMAGE_B it MUST still face left in the output; if it faces right keep it right.
+Do not redesign, redraw, recolor, reproportion or restyle it.
+Keep the same visible side, wheels, body panels, lights, glass, materials and details.
+Only allowed change: global exposure and contrast to match the scene light.
 
+IMAGE ROLES:
+IMAGE_A = final background. Keep its architecture, framing, camera angle and perspective.
+IMAGE_C = geometry guide ONLY (vehicle position, scale, rotation). Never copy its lighting, style, logo or text.
 
-Photorealistic premium automotive photography.
-Real vehicle.
-Real environment.
-Natural lighting.
-Production-quality realism.
+YOUR ONLY JOB = integration:
+Place the IMAGE_B vehicle exactly as shown by IMAGE_C, then blend it into IMAGE_A with:
+- realistic contact shadows under the tires and chassis
+- subtle ground reflection and accurate grounding
+- coherent light direction and atmosphere
+Update only the scenery seen THROUGH the windows so the background continues naturally; keep realistic glass transparency and depth.
+
+DO NOT:
+mirror or flip the vehicle, reverse its facing direction, change its model / shape / wheels / color / proportions / details, redraw or regenerate it, produce a generic or AI-looking vehicle, make it float, add fake shadows, change the background composition, output low quality.
+
+Photorealistic premium automotive photography. Real vehicle, real environment, natural lighting, production-quality realism.

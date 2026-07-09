@@ -1042,6 +1042,72 @@ async function flattenImageIfNeeded(
     );
   }
 }
+// Composite pixel-exact brand layers (vehicle cutout and/or logo) on top of the
+// AI-generated image, reusing the same coordinate math the prompt describes.
+// A generative model cannot preserve these layers exactly; compositing them
+// server-side makes them deterministic (identical every run).
+async function compositeExactLayers(
+  aiDataUrl: string,
+  opts: {
+    canvasSize: number;
+    includeVehicle: boolean;
+    vehiclePart: { inlineData: { data: string; mimeType: string } } | null;
+    vehicle: { centerX: number; centerY: number; drawW: number; drawH: number; rotDeg: number };
+    logoPart: { inlineData: { data: string; mimeType: string } } | null;
+    logo: { centerX: number; centerY: number; boxSize: number };
+  },
+  stepsLogs: string[]
+): Promise<string> {
+  try {
+    const m = aiDataUrl.match(/^data:([^;]+);base64,(.+)$/);
+    if (!m) return aiDataUrl;
+    const base = await Jimp.read(Buffer.from(m[2], "base64"));
+    const outW = base.width;
+    const outH = base.height;
+    // Coordinates are expressed on a square canvasSize grid; scale to output px
+    const sx = outW / opts.canvasSize;
+    const sy = outH / opts.canvasSize;
+
+    if (opts.includeVehicle && opts.vehiclePart) {
+      const veh = await Jimp.read(Buffer.from(opts.vehiclePart.inlineData.data, "base64"));
+      // Contain-fit the cutout into the target box, preserving its NATIVE aspect
+      // ratio (never stretch), exactly like the PWA canvas composite does.
+      const boxW = Math.max(1, opts.vehicle.drawW * sx);
+      const boxH = Math.max(1, opts.vehicle.drawH * sy);
+      const nativeAr = veh.width / veh.height;
+      let dw = boxW, dh = boxW / nativeAr;
+      if (dh > boxH) { dh = boxH; dw = boxH * nativeAr; }
+      veh.resize({ w: Math.max(1, Math.round(dw)), h: Math.max(1, Math.round(dh)) });
+      if (Math.abs(opts.vehicle.rotDeg) > 0.05 && typeof (veh as any).rotate === "function") {
+        try { (veh as any).rotate(-opts.vehicle.rotDeg); } catch { /* rotation optional */ }
+      }
+      const vx = Math.round(opts.vehicle.centerX * sx - veh.width / 2);
+      const vy = Math.round(opts.vehicle.centerY * sy - veh.height / 2);
+      base.composite(veh, vx, vy);
+      stepsLogs.push(`🖼️ [COMPOSITE] Véhicule exact recollé à (${vx}, ${vy}), taille ${veh.width}x${veh.height}px.`);
+    }
+
+    if (opts.logoPart) {
+      const logo = await Jimp.read(Buffer.from(opts.logoPart.inlineData.data, "base64"));
+      const box = Math.max(1, Math.round(opts.logo.boxSize * ((sx + sy) / 2)));
+      const ar = logo.width / logo.height;
+      let lw = box, lh = box;
+      if (ar > 1) lh = Math.round(box / ar); else lw = Math.round(box * ar);
+      logo.resize({ w: Math.max(1, lw), h: Math.max(1, lh) });
+      const lx = Math.round(opts.logo.centerX * sx - logo.width / 2);
+      const ly = Math.round(opts.logo.centerY * sy - logo.height / 2);
+      base.composite(logo, lx, ly);
+      stepsLogs.push(`🖼️ [COMPOSITE] Logo exact recollé à (${lx}, ${ly}), taille ${logo.width}x${logo.height}px.`);
+    }
+
+    const out = await base.getBuffer("image/jpeg");
+    return `data:image/jpeg;base64,${out.toString("base64")}`;
+  } catch (e: any) {
+    stepsLogs.push(`⚠️ [COMPOSITE] Échec du compositing exact (${e.message || e}). Image IA renvoyée telle quelle.`);
+    return aiDataUrl;
+  }
+}
+
 // API Route for actual Gemini Generation & Inpainting Simulation
 app.post("/api/gemini/generate", requireApiSecret, rateLimit(6), async (req, res) => {
   const stepsLogs: string[] = [];
@@ -1387,6 +1453,12 @@ const final_H_B = Number(H_B || 900);
   }
 
   let imageResult = "";
+  // Comparison mode: when the request sets returnVariants, we also produce two
+  // post-composited versions (exact vehicle vs AI vehicle) from the SAME single
+  // Gemini generation — no extra API call, only a few ms of Jimp compositing.
+  const returnVariants = req.body.returnVariants === true;
+  let variantExactData: string | null = null;
+  let variantAiData: string | null = null;
 
   try {
       stepsLogs.push(`🔗 [SDK] Initialisation du client GoogleGenAI...`);
@@ -1400,6 +1472,12 @@ const final_H_B = Number(H_B || 900);
       });
 
 const parts: any[] = [];
+
+// Front bookend: the single most important rule, stated up front (models weight
+// the beginning of the prompt heavily). It is repeated at the very end too.
+parts.push({
+  text: "TASK: integrate the EXACT vehicle from IMAGE_B into the IMAGE_A environment, positioned as in IMAGE_C. ABSOLUTE RULE: never mirror, flip or reverse the vehicle — keep its exact facing direction from IMAGE_B."
+});
 
 if (isGemini3ProImage) {
   stepsLogs.push(
@@ -1420,7 +1498,7 @@ if (isGemini3ProImage) {
   }
 
   if (partB) {
-    parts.push({ text: "IMAGE_B - EXACT VEHICLE REFERENCE" });
+    parts.push({ text: "IMAGE_B - EXACT VEHICLE TO PRESERVE (lock identity AND facing direction; never mirror or flip)" });
     parts.push(partB);
   }
 
@@ -1458,78 +1536,32 @@ if (!partA || !partB || !partC) {
       }
 
       if (!basePromptText) {
-          basePromptText = `Create one photorealistic automotive image from the three input images.
-IMAGE_A is the environment reference.
-Use IMAGE_A as the final background.
-Preserve its architecture, composition, framing, camera angle and perspective.
-IMAGE_B is the exact transparent PNG vehicle cutout.
-Use the exact vehicle from IMAGE_B.
-Do not replace, redesign, redraw, reinterpret or regenerate the vehicle.
-IMAGE_C is a geometry guide only.
-Use IMAGE_C only to determine vehicle position, scale and rotation.
-Do not copy its lighting, shadows, rendering style, logo appearance or text appearance.
-PRIORITY
-	1	Preserve the exact vehicle from IMAGE_B.
-	2	Preserve the environment composition from IMAGE_A.
-	3	Match the vehicle placement shown in IMAGE_C.
-	4	Improve realism only through integration.
-VEHICLE PRESERVATION
-Do not modify:
-	•	vehicle model
-	•	shape
-	•	proportions
-	•	wheels
-	•	paint color
-	•	body panels
-	•	lights
-	•	glass shape
-	•	materials
-	•	textures
-	•	existing reflections
-	•	vehicle details
-Allowed vehicle adjustments only:
-	•	global exposure
-	•	global contrast
-ENVIRONMENT
-Only adjust:
-	•	lighting
-	•	shadows
-	•	exposure
-	•	atmosphere
-INTEGRATION
-Add:
-	•	realistic contact shadows under the tires and chassis
-	•	subtle ground reflections
-	•	physically accurate grounding
-	•	coherent light direction
-	•	seamless photographic integration
-WINDOWS
-Update only the scenery visible through the vehicle windows so the environment continues naturally behind the glass.
-Preserve realistic transparency, perspective, depth and optical distortion.
+          basePromptText = `Composite ONE photorealistic image from the three inputs.
 
-NEGATIVE
-generic sports car,
-different vehicle,
-changed vehicle design,
-changed wheels,
-changed paint color,
-changed proportions,
-changed vehicle details,
-changed textures,
-different background composition,
-incorrect placement,
-fake shadows,
-floating vehicle,
-ai-generated vehicle,
-ai composite look,
-low quality
+VEHICLE LOCK - HIGHEST PRIORITY (IMAGE_B):
+Reproduce the vehicle from IMAGE_B exactly, pixel for pixel.
+Keep its exact left-right orientation and facing direction.
+NEVER mirror, flip, rotate or turn the vehicle.
+If the vehicle faces left in IMAGE_B it MUST still face left in the output; if it faces right keep it right.
+Do not redesign, redraw, recolor, reproportion or restyle it.
+Keep the same visible side, wheels, body panels, lights, glass, materials and details.
+Only allowed change: global exposure and contrast to match the scene light.
 
+IMAGE ROLES:
+IMAGE_A = final background. Keep its architecture, framing, camera angle and perspective.
+IMAGE_C = geometry guide ONLY (vehicle position, scale, rotation). Never copy its lighting, style, logo or text.
 
-Photorealistic premium automotive photography.
-Real vehicle.
-Real environment.
-Natural lighting.
-Production-quality realism.`;
+YOUR ONLY JOB = integration:
+Place the IMAGE_B vehicle exactly as shown by IMAGE_C, then blend it into IMAGE_A with:
+- realistic contact shadows under the tires and chassis
+- subtle ground reflection and accurate grounding
+- coherent light direction and atmosphere
+Update only the scenery seen THROUGH the windows so the background continues naturally; keep realistic glass transparency and depth.
+
+DO NOT:
+mirror or flip the vehicle, reverse its facing direction, change its model / shape / wheels / color / proportions / details, redraw or regenerate it, produce a generic or AI-looking vehicle, make it float, add fake shadows, change the background composition, output low quality.
+
+Photorealistic premium automotive photography. Real vehicle, real environment, natural lighting, production-quality realism.`;
       }
 
       let promptText = basePromptText;
@@ -1662,6 +1694,10 @@ Draw with standard typography rendering: fillText("${textContent}", ${tx.toFixed
         }
       }
 
+      // End bookend: repeat the single hardest rule last (models also weight the
+      // end of the prompt strongly — the anti-mirror rule is stated first and last).
+      promptText += `\n\nFINAL REMINDER (most important): output the EXACT IMAGE_B vehicle — same facing direction, NOT mirrored, NOT flipped, NOT rotated, NOT redrawn.`;
+
       stepsLogs.push(`✏️ [PROMPT COMPILÉ FINAL] "${promptText}"`);
 
       // Add actual prompt text and strict instruction
@@ -1766,6 +1802,27 @@ if (!imageResult) {
   throw new Error("Gemini n'a renvoyé aucune image dans sa réponse.");
 }
 
+// Produce the two post-composited variants from the single AI generation.
+// All coordinates (vehicle transform, logo box) are in scope here.
+if (returnVariants) {
+  const compositeOpts = {
+    canvasSize,
+    vehiclePart: partB,
+    vehicle: {
+      centerX,
+      centerY,
+      drawW: targetW * effectiveScale,
+      drawH: targetH * effectiveScale,
+      rotDeg: rot_user,
+    },
+    logoPart: partLogo,
+    logo: { centerX: logoCenterX, centerY: logoCenterY, boxSize: logoSizePx },
+  };
+  stepsLogs.push(`🔬 [COMPARAISON] Génération des 2 variantes (véhicule exact vs véhicule IA) à partir de la même image Gemini...`);
+  variantExactData = await compositeExactLayers(imageResult, { ...compositeOpts, includeVehicle: true }, stepsLogs);
+  variantAiData = await compositeExactLayers(imageResult, { ...compositeOpts, includeVehicle: false }, stepsLogs);
+}
+
 
     } catch (err: any) {
       const errMsg = err.message || String(err);
@@ -1812,6 +1869,20 @@ if (!imageResult) {
   const uploaded = await uploadGeneratedImageToStorage(imageResult, activeBucket, objectPath, stepsLogs, requestBaseUrl);
   const storagePath = uploaded.storagePath;
   const finalPublicUrl = uploaded.publicUrl;
+
+  // Upload the comparison variants when requested
+  let variantUrls: { ai?: string; exact?: string } | undefined;
+  if (variantAiData || variantExactData) {
+    variantUrls = {};
+    if (variantExactData) {
+      const upExact = await uploadGeneratedImageToStorage(variantExactData, activeBucket, `users/${activeUserId}/homescreens/variant_exact_${timestamp}.jpg`, stepsLogs, requestBaseUrl);
+      variantUrls.exact = upExact.publicUrl;
+    }
+    if (variantAiData) {
+      const upAi = await uploadGeneratedImageToStorage(variantAiData, activeBucket, `users/${activeUserId}/homescreens/variant_ai_${timestamp}.jpg`, stepsLogs, requestBaseUrl);
+      variantUrls.ai = upAi.publicUrl;
+    }
+  }
 
   const newItem: GenerationHistoryItem = {
     id: `gen_${Date.now()}`,
@@ -1862,6 +1933,7 @@ if (!imageResult) {
     geometryGuidanceMode: activeCoordMode,
     coordinatePromptMode: activeCoordMode,
     modelUsed: activeModel,
+    variants: variantUrls,
     logs: stepsLogs,
     metrics: {
       inputTokens: totalInputTokens,
