@@ -1,0 +1,62 @@
+{
+  "entities": {
+    "ExportJob": {
+      "title": "ExportJob",
+      "description": "Represents an image composition and rendering job transmitted between PWA and IA engine",
+      "type": "object",
+      "properties": {
+        "imageA": {
+          "type": "string",
+          "description": "Background image URL"
+        },
+        "presetsFond": {
+          "type": "object",
+          "description": "Background graphic restrictions and rules"
+        },
+        "imageB": {
+          "type": "string",
+          "description": "Cutout vehicle foreground image URL"
+        },
+        "imageC": {
+          "type": "string",
+          "description": "Visual layout reference guide as a compressed JPEG"
+        },
+        "logo": {
+          "type": "string",
+          "description": "Sponsor/brand logo absolute URL"
+        },
+        "metadataUtilisateur": {
+          "type": "object",
+          "description": "Text slogan input and exact 2D transformation matrix"
+        },
+        "status": {
+          "type": "string",
+          "description": "Generator state machine stage"
+        },
+        "progress": {
+          "type": "number",
+          "description": "Execution progress percentage"
+        },
+        "imageFinal": {
+          "type": "string",
+          "description": "High definition rendered output"
+        },
+        "url": {
+          "type": "string",
+          "description": "Direct URL of final asset"
+        },
+        "completedAt": {
+          "type": "string",
+          "description": "ISO completion timestamp"
+        }
+      },
+      "required": ["imageA", "imageB"]
+    }
+  },
+  "firestore": {
+    "/exports/{jobId}": {
+      "schema": "ExportJob",
+      "description": "Active tasks monitored in real time by the generator control panel"
+    }
+  }
+}

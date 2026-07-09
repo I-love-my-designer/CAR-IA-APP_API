@@ -1,0 +1,99 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // 1. Protection globale par défaut
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Utilitaires de validation réutilisables
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128;
+    }
+    
+    function incoming() {
+      return request.resource.data;
+    }
+    
+    // Validation stricte des jobs d'exportation d'images
+    function isValidExportJob(data, isCreate) {
+      return (!('status' in data) || (data.status is string && (data.status == 'pending' || data.status == 'waiting_inputs' || data.status == 'ready_to_generate' || data.status == 'processing' || data.status == 'completed' || data.status == 'failed')))
+        && (!('imageA' in data) || data.imageA is string)
+        && (!('imageB' in data) || data.imageB is string)
+        && (!('imageC' in data) || data.imageC is string)
+        && (!('fond' in data) || data.fond is string)
+        && (!('preview' in data) || data.preview is string)
+        && (!('vehicule' in data) || data.vehicule is string)
+        && (!('createdAt' in data) || data.createdAt != null)
+        && (!('presetsFond' in data) || data.presetsFond is map)
+        && (!('metadataUtilisateur' in data) || data.metadataUtilisateur is map)
+        && (!('logo' in data) || data.logo == null || data.logo is string)
+        && (isCreate || !('imageFinal' in data) || data.imageFinal is string)
+        && (isCreate || !('errorMessage5' in data) || data.errorMessage5 is string)
+        && (isCreate || !('progress' in data) || data.progress == null || data.progress is int || data.progress is float || data.progress is number)
+        && (isCreate || !('url' in data) || data.url == null || data.url is string)
+        && (isCreate || !('completedAt' in data) || data.completedAt == null || data.completedAt is string)
+        && data.keys().size() <= 40;
+    }
+
+    // Validation des données de presets (Entries / entries)
+    function isValidEntry(data) {
+      return data.keys().hasAll([
+        'imageId', 'logo', 'imageSize', 'imagePosition', 'imageColorFill', 'imageExtra',
+        'logoX', 'logoY',
+        'textEnabled', 'textFont', 'textSize', 'textAlign', 'textPosition', 'textColorFill', 'perspective', 'textExtra',
+        'textX', 'textY',
+        'createdAt'
+      ])
+        && ((request.auth == null && data.keys().size() == 19) || (request.auth != null && 'userId' in data && data.userId == request.auth.uid && data.keys().size() == 20))
+        && data.imageId is string && data.imageId.size() <= 100
+        && data.logo is bool
+        && data.imageSize is string && data.imageSize.size() <= 100
+        && data.imagePosition is string && data.imagePosition.size() <= 100
+        && data.imageColorFill is string && data.imageColorFill.size() <= 100
+        && data.imageExtra is string && data.imageExtra.size() <= 500
+        && data.logoX is string && data.logoX.size() <= 100
+        && data.logoY is string && data.logoY.size() <= 100
+        && data.textEnabled is bool
+        && data.textFont is string && data.textFont.size() <= 100
+        && data.textSize is string && data.textSize.size() <= 100
+        && data.textAlign is string && data.textAlign.size() <= 100
+        && data.textPosition is string && data.textPosition.size() <= 100
+        && data.textColorFill is string && data.textColorFill.size() <= 100
+        && data.perspective is string && data.perspective.size() <= 100
+        && data.textExtra is string && data.textExtra.size() <= 500
+        && data.textX is string && data.textX.size() <= 100
+        && data.textY is string && data.textY.size() <= 100
+        && data.createdAt == request.time;
+    }
+
+    // Règles de la collection 'exports' (Jobs de compositing de la PWA)
+    match /exports/{jobId} {
+      allow read, write: if true;
+    }
+
+    // Règles pour la collection 'prompts_ia'
+    match /prompts_ia/{promptId} {
+      allow read, write: if true;
+    }
+
+    // Règles pour la collection 'entries' (Minuscule)
+    match /entries/{entryId} {
+      allow read, get, list: if true;
+      allow create, update: if isValidId(entryId) && isValidEntry(incoming());
+      allow delete: if !isSignedIn() || (resource != null && resource.data.userId == request.auth.uid);
+    }
+
+    // Règles pour la collection 'Entries' (Majuscule - AJOUTÉ pour résoudre l'erreur)
+    match /Entries/{entryId} {
+      allow read, get, list: if true;
+      allow create, update: if isValidId(entryId) && isValidEntry(incoming());
+      allow delete: if !isSignedIn() || (resource != null && resource.data.userId == request.auth.uid);
+    }
+  }
+}
