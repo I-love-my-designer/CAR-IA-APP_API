@@ -987,8 +987,10 @@ async function flattenImageIfNeeded(
     let width = image.width;
     let height = image.height;
 
-    // 3. Guard against giant images: resize to max 1600px on the longest side to keep payload light
-    const maxDimension = 1600;
+    // 3. Guard against giant images: resize to max 2048px (2K) on the longest side.
+    // 2K keeps the high-resolution composition reference (IMAGE_C) and vehicle
+    // detail intact for the model, while still bounding the payload.
+    const maxDimension = 2048;
     if (width > maxDimension || height > maxDimension) {
       if (width > height) {
         height = Math.round((height * maxDimension) / width);
@@ -1105,6 +1107,45 @@ async function compositeExactLayers(
   } catch (e: any) {
     stepsLogs.push(`⚠️ [COMPOSITE] Échec du compositing exact (${e.message || e}). Image IA renvoyée telle quelle.`);
     return aiDataUrl;
+  }
+}
+
+// Overlay a full-frame transparent branding layer (logo + text, rendered by the
+// PWA with the exact fonts) on top of the AI-generated image. This keeps the
+// branding pixel-perfect ("overlay" mode) instead of letting the model render it.
+async function applyBrandingOverlay(baseDataUrl: string, overlaySource: string, stepsLogs: string[]): Promise<string> {
+  try {
+    const m = baseDataUrl.match(/^data:([^;]+);base64,(.+)$/);
+    if (!m) return baseDataUrl;
+    const base = await Jimp.read(Buffer.from(m[2], "base64"));
+
+    // The overlay may be a data URL or an http(s) URL
+    let overlayBuf: Buffer;
+    if (overlaySource.startsWith("data:")) {
+      const om = overlaySource.match(/^data:([^;]+);base64,(.+)$/);
+      if (!om) return baseDataUrl;
+      overlayBuf = Buffer.from(om[2], "base64");
+    } else if (/^https?:\/\//.test(overlaySource)) {
+      const r = await fetch(overlaySource);
+      if (!r.ok) throw new Error(`overlay HTTP ${r.status}`);
+      overlayBuf = Buffer.from(await r.arrayBuffer());
+    } else {
+      return baseDataUrl;
+    }
+
+    const overlay = await Jimp.read(overlayBuf);
+    // The PWA renders the branding layer full-frame on a transparent background,
+    // so we just scale it to the output size and composite at (0,0).
+    if (overlay.width !== base.width || overlay.height !== base.height) {
+      overlay.resize({ w: base.width, h: base.height });
+    }
+    base.composite(overlay, 0, 0);
+    const out = await base.getBuffer("image/jpeg");
+    stepsLogs.push(`🏷️ [OVERLAY] Calque de marque (logo/texte) incrusté net par-dessus l'image générée.`);
+    return `data:image/jpeg;base64,${out.toString("base64")}`;
+  } catch (e: any) {
+    stepsLogs.push(`⚠️ [OVERLAY] Échec de l'incrustation du calque de marque (${e.message || e}). Image renvoyée sans calque.`);
+    return baseDataUrl;
   }
 }
 
@@ -1460,6 +1501,11 @@ const final_H_B = Number(H_B || 900);
   let variantExactData: string | null = null;
   let variantAiData: string | null = null;
 
+  // Branding mode (declared at handler scope so the post-generation overlay step
+  // below can see it). "overlay" = logo/text applied crisp in post-production;
+  // "integrated" = model renders logo/text into the scene (relief/engraving).
+  const brandingMode = req.body.brandingMode === "integrated" ? "integrated" : "overlay";
+
   try {
       stepsLogs.push(`🔗 [SDK] Initialisation du client GoogleGenAI...`);
       const ai = new GoogleGenAI({
@@ -1473,43 +1519,48 @@ const final_H_B = Number(H_B || 900);
 
 const parts: any[] = [];
 
-// Front bookend: the single most important rule, stated up front (models weight
-// the beginning of the prompt heavily). It is repeated at the very end too.
-parts.push({
-  text: "TASK: integrate the EXACT vehicle from IMAGE_B into the IMAGE_A environment, positioned as in IMAGE_C. ABSOLUTE RULE: never mirror, flip or reverse the vehicle — keep its exact facing direction from IMAGE_B."
-});
+// Branding mode:
+//  - "overlay"    (default): logo/text are added crisp in post-production; the
+//    model only renders the vehicle+scene. No coordinate directives, no logo
+//    sent to the model. This is the clean pipeline (like the NODE app) that
+//    keeps the vehicle faithful and never flips it.
+//  - "integrated": the model itself renders the logo/text into the scene
+//    (relief/engraving), so we keep the descriptive placement directives.
+stepsLogs.push(`🏷️ [BRANDING] Mode : '${brandingMode}' (${brandingMode === "overlay" ? "logo/texte en post-prod" : "logo/texte générés dans la scène"}).`);
 
 if (isGemini3ProImage) {
   stepsLogs.push(
-    `🎯 [SDK-PREP] Modèle Gemini 3 Pro-image détecté. Passage de l'IMAGE_C (Guide spatial de composition uniquement) pour se conformer au mode d'écoute ciblé.`
+    `🎯 [SDK-PREP] Modèle Gemini 3 Pro-image détecté. Passage de l'IMAGE_C (composition finale) uniquement.`
   );
   if (partC) {
-    parts.push({ text: "IMAGE_C - COMPOSITION / GEOMETRY GUIDE" });
+    parts.push({ text: "[IMAGE_C - FINAL COMPOSITION REFERENCE]" });
     parts.push(partC);
   }
 } else {
   stepsLogs.push(
-    `🎯 [SDK-PREP] Modèle Gemini classique détecté ('${activeModel}'). Passage des 3 images d'entrée : IMAGE_A, IMAGE_B, IMAGE_C.`
+    `🎯 [SDK-PREP] Modèle Gemini classique ('${activeModel}'). Passage des 3 images : IMAGE_A (fond), IMAGE_B (véhicule), IMAGE_C (composition).`
   );
 
   if (partA) {
-    parts.push({ text: "IMAGE_A - ENVIRONMENT REFERENCE" });
+    parts.push({ text: "[IMAGE_A - BACKGROUND ENVIRONMENT]" });
     parts.push(partA);
   }
 
   if (partB) {
-    parts.push({ text: "IMAGE_B - EXACT VEHICLE TO PRESERVE (lock identity AND facing direction; never mirror or flip)" });
+    parts.push({ text: "[IMAGE_B - VEHICLE REFERENCE]" });
     parts.push(partB);
   }
 
   if (partC) {
-    parts.push({ text: "IMAGE_C - COMPOSITION / GEOMETRY GUIDE" });
+    parts.push({ text: "[IMAGE_C - FINAL COMPOSITION REFERENCE]" });
     parts.push(partC);
   }
 }
 
-if (partLogo) {
-  stepsLogs.push(`🎯 [SDK-PREP] Logo de marque de référence détecté. Passage de LOGO_IMAGE pour incrustation de marque.`);
+// In "integrated" mode the model needs the logo image to render it into the
+// scene; in "overlay" mode the logo is applied later, so we do NOT send it.
+if (partLogo && brandingMode === "integrated") {
+  stepsLogs.push(`🎯 [SDK-PREP] Logo de marque de référence détecté. Passage de LOGO_IMAGE pour incrustation par le modèle.`);
   parts.push({ text: "LOGO_IMAGE - BRAND LOGO REFERENCE TO PLACE AT COORDINATES" });
   parts.push(partLogo);
 }
@@ -1536,32 +1587,30 @@ if (!partA || !partB || !partC) {
       }
 
       if (!basePromptText) {
-          basePromptText = `Composite ONE photorealistic image from the three inputs.
+          basePromptText = `IMAGE_C = final composition reference. Keep the vehicle perfectly identical in scale and position.
+IMAGE_A = background environment. Keep the environment architecture, composition and perspective perfectly identical.
+IMAGE_B = vehicle reference. Keep the vehicle perfectly identical.
 
-VEHICLE LOCK - HIGHEST PRIORITY (IMAGE_B):
-Reproduce the vehicle from IMAGE_B exactly, pixel for pixel.
-Keep its exact left-right orientation and facing direction.
-NEVER mirror, flip, rotate or turn the vehicle.
-If the vehicle faces left in IMAGE_B it MUST still face left in the output; if it faces right keep it right.
-Do not redesign, redraw, recolor, reproportion or restyle it.
-Keep the same visible side, wheels, body panels, lights, glass, materials and details.
-Only allowed change: global exposure and contrast to match the scene light.
+You may only modify around the vehicle:
+- lighting
+- shadows
+- exposure
+- atmosphere
 
-IMAGE ROLES:
-IMAGE_A = final background. Keep its architecture, framing, camera angle and perspective.
-IMAGE_C = geometry guide ONLY (vehicle position, scale, rotation). Never copy its lighting, style, logo or text.
+You have to add realistic contact shadows under the vehicle and a subtle floor reflection. Analyse if the environment has elements that pass in front of the vehicle and adapt them for a believable shot.
 
-YOUR ONLY JOB = integration:
-Place the IMAGE_B vehicle exactly as shown by IMAGE_C, then blend it into IMAGE_A with:
-- realistic contact shadows under the tires and chassis
-- subtle ground reflection and accurate grounding
-- coherent light direction and atmosphere
-Update only the scenery seen THROUGH the windows so the background continues naturally; keep realistic glass transparency and depth.
+Do not modify the vehicle:
+- paint, scale, position, shape, details, texture, bodywork, wheels, badges, headlights.
+Do NOT add, remove, raise, lower or resize any windows, side windows, glass panels or roof. Keep the EXACT same glass shapes, frames and greenhouse as in IMAGE_B (if a window is absent or lowered, it MUST stay absent/lowered). Do not create any new glass.
+Do not regenerate the vehicle.
+The only allowed vehicle modifications: contrast, exposure.
 
-DO NOT:
-mirror or flip the vehicle, reverse its facing direction, change its model / shape / wheels / color / proportions / details, redraw or regenerate it, produce a generic or AI-looking vehicle, make it float, add fake shadows, change the background composition, output low quality.
+GLASS CONTENT — through the EXISTING glazing only:
+Update ONLY what is seen through and reflected on the vehicle's existing glass so it matches IMAGE_A (the new environment). The scenery and reflections visible behind/through the windows and windshield must show the new environment, never any previous or foreign background. Keep ultra-realistic transparency, correct perspective, realistic depth, subtle optical distortion, coherent brightness and realistic interior darkness. Do NOT invent or add any glass to do this — only change the content seen through the glazing that already exists.
 
-Photorealistic premium automotive photography. Real vehicle, real environment, natural lighting, production-quality realism.`;
+The final result must look like a real automotive photograph, not an AI composite.
+
+Priority: adapt the environment to the vehicle, never adapt the vehicle to the environment.`;
       }
 
       let promptText = basePromptText;
@@ -1613,6 +1662,12 @@ Photorealistic premium automotive photography. Real vehicle, real environment, n
       if (textAlignVal === "DROITE") alignedText = "right";
 
       const activeCoordMode = (coordinatePromptMode === "COORD_LIGHT" || geometryGuidanceMode === "COORD_LIGHT") ? "COORD_LIGHT" : "COORD_LONG";
+
+      // Coordinate/placement directives are ONLY used in "integrated" branding
+      // mode. In the default "overlay" mode they are skipped entirely: telling a
+      // generative model to "position the vehicle at X,Y, rotation, scale" makes
+      // it reconstruct/re-orient the vehicle (flips, lost 3/4 view, quality drop).
+      if (brandingMode === "integrated") {
       stepsLogs.push(`📐 [GEOMETRY] Mode d'aide géométrique actif : '${activeCoordMode}'`);
 
       if (activeCoordMode === "COORD_LIGHT") {
@@ -1694,9 +1749,9 @@ Draw with standard typography rendering: fillText("${textContent}", ${tx.toFixed
         }
       }
 
-      // End bookend: repeat the single hardest rule last (models also weight the
-      // end of the prompt strongly — the anti-mirror rule is stated first and last).
+      // End bookend: repeat the anti-mirror rule last (integrated mode only).
       promptText += `\n\nFINAL REMINDER (most important): output the EXACT IMAGE_B vehicle — same facing direction, NOT mirrored, NOT flipped, NOT rotated, NOT redrawn.`;
+      } // end of brandingMode === "integrated" directives
 
       stepsLogs.push(`✏️ [PROMPT COMPILÉ FINAL] "${promptText}"`);
 
@@ -1725,15 +1780,22 @@ const imageConfigToSend: any = {
   aspectRatio: cleanAspectRatio
 };
 
-// Certains modèles Gemini supportent imageSize
-const supportsImageSize =
-  activeModel.includes("2.5-flash-image") ||
-  activeModel.includes("3.1-flash-image") ||
-  activeModel.includes("3-pro-image");
+// Only the "-preview" image models accept imageSize — same rule as the working
+// NODE app (which sends imageSize only when model.includes('preview')).
+const supportsImageSize = activeModel.includes("preview");
 
 if (supportsImageSize) {
   imageConfigToSend.imageSize = imageSize || "1K";
 }
+
+// System instruction steers the model toward faithful editing/rendering rather
+// than free generation — the single biggest quality lever, and what the working
+// NODE reference app uses.
+const systemInstruction =
+  "You are a professional automotive retoucher and creative assistant. " +
+  "Generate or edit images based on the user's prompt and the provided images. " +
+  "Preserve the referenced vehicle exactly (shape, pose, orientation, proportions, details); " +
+  "only adapt the environment, lighting, shadows and glass. Never mirror or flip the vehicle.";
 
 // Appel Gemini
 apiResponse = await ai.models.generateContent({
@@ -1745,7 +1807,8 @@ apiResponse = await ai.models.generateContent({
     }
   ],
   config: {
-    imageConfig: imageConfigToSend
+    imageConfig: imageConfigToSend,
+    systemInstruction
   }
 });
 
@@ -1838,6 +1901,13 @@ if (returnVariants) {
 
   if (!imageResult) {
     throw new Error("Aucune image générée — Gemini n'a renvoyé aucun inlineData.");
+  }
+
+  // Post-production branding overlay (Mode 1): stamp the exact logo/text layer
+  // rendered by the PWA on top of the generated image, pixel-perfect.
+  const brandingOverlaySource = req.body.brandingOverlay || req.body.brandingLayer;
+  if (brandingMode === "overlay" && brandingOverlaySource) {
+    imageResult = await applyBrandingOverlay(imageResult, brandingOverlaySource, stepsLogs);
   }
 
   const getModelShortName = (modelName: string): string => {

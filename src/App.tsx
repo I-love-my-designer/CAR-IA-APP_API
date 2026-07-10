@@ -370,8 +370,14 @@ export default function App() {
   const [isSuccessState, setIsSuccessState] = useState<boolean>(false);
 
   // Section 6: Unified Gemini Multimodal Generation API States
-  const [geminiModel, setGeminiModel] = useState<string>("gemini-3.1-flash-image");
+  // Default aligned with the working NODE app: 2.5-flash never flips and, with the
+  // corrected prompt, matches the NODE app's quality. (3.1-flash caused the flips.)
+  const [geminiModel, setGeminiModel] = useState<string>("gemini-2.5-flash-image");
   const [coordinatePromptMode, setCoordinatePromptMode] = useState<"COORD_LONG" | "COORD_LIGHT">("COORD_LONG");
+  // Branding mode forwarded from the PWA job: "overlay" = logo/text stamped crisp
+  // in post-prod from brandingOverlay; "integrated" = model renders them in-scene.
+  const [brandingMode, setBrandingMode] = useState<"overlay" | "integrated">("overlay");
+  const [brandingOverlay, setBrandingOverlay] = useState<string>("");
   const [geminiPrompt, setGeminiPrompt] = useState<string>(`Photorealistic premium automotive photography.
 Real vehicle.
 Real environment.
@@ -460,7 +466,9 @@ low quality`);
   const [geminiDescC, setGeminiDescC] = useState<string>("");
 
   // --- CAPTEUR DE FLUX REEL FIRESTORE STATES ---
-  const [isSyncActive, setIsSyncActive] = useState<boolean>(false);
+  // Actif par défaut : onSnapshot est push-based, l'écoute au repos ne consomme
+  // pas de quota (facturation par document lu, pas par temps d'écoute).
+  const [isSyncActive, setIsSyncActive] = useState<boolean>(true);
   const [syncStatus, setSyncStatus] = useState<"disconnected" | "connecting" | "connected" | "error">("disconnected");
   const [syncError, setSyncError] = useState<string>("");
   const [receivedJobs, setReceivedJobs] = useState<any[]>([]);
@@ -947,6 +955,8 @@ Production-quality realism.`;
               W_B: 1600,
               H_B: 900,
               coordinatePromptMode: coordinatePromptMode,
+              brandingMode: brandingMode,
+              brandingOverlay: brandingOverlay,
               jobId: activeJobId
             })
           });
@@ -1157,6 +1167,10 @@ Production-quality realism.`;
       currentUserId = extractedUserId;
       setUserId(extractedUserId);
     }
+
+    // Branding fields from the PWA job (Mode 1 overlay by default)
+    setBrandingMode(job.brandingMode === "integrated" ? "integrated" : "overlay");
+    setBrandingOverlay(job.brandingOverlay || "");
     
     const resolve = (val: string) => {
       if (!val) return "";
@@ -1972,6 +1986,8 @@ Production-quality realism.`;
           W_B: 1600,
           H_B: 900,
           coordinatePromptMode: coordinatePromptMode,
+          brandingMode: brandingMode,
+          brandingOverlay: brandingOverlay,
           jobId: activeJobId
         }),
       });
@@ -4302,9 +4318,9 @@ const db = getFirestore(app, pwaConfig.firestoreDatabaseId);`}
                         onChange={(e) => setGeminiModel(e.target.value)}
                         className="bg-slate-900 border border-slate-800 text-slate-300 rounded px-2.5 py-1 text-xs font-mono outline-none focus:border-emerald-500 w-full cursor-pointer h-8"
                       >
-                       <option value="gemini-2.5-flash-image">gemini-2.5-flash-image (Image)</option>
-                       <option value="gemini-3.1-flash-image">gemini-3.1-flash-image (Image avancé)</option>
-                       <option value="gemini-3-pro-image">gemini-3-pro-image (Qualité maximale)</option>
+                       <option value="gemini-2.5-flash-image">gemini-2.5-flash-image (rapide, sans flip)</option>
+                       <option value="gemini-3-pro-image-preview">gemini-3-pro-image-preview (qualité max — comme l'app node)</option>
+                       <option value="gemini-3.1-flash-image">gemini-3.1-flash-image (expérimental — peut flipper)</option>
                       </select>
                     </div>
 
