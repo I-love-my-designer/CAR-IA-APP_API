@@ -1,6 +1,10 @@
 {
   "firestore": [
     {
+      "database": "car-ia-photobooth",
+      "rules": "firestore.rules"
+    },
+    {
       "database": "ai-studio-20bb72b2-2c7c-4bdc-967b-ecd3e4f27e13",
       "rules": "firestore.rules"
     },

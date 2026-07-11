@@ -8,13 +8,13 @@ export const FIREBASE_DEFAULTS = {
   appId: "1:172885729212:web:ab072eb63a25c3af0c95b9",
   apiKey: "AIzaSyBVF5JPs_yXKRlrQUK3NlAm97cDntLEz9o",
   authDomain: "gen-lang-client-0870404092.firebaseapp.com",
-  firestoreDatabaseId: "ai-studio-20bb72b2-2c7c-4bdc-967b-ecd3e4f27e13",
+  firestoreDatabaseId: "car-ia-photobooth",
   storageBucket: "gen-lang-client-0870404092.firebasestorage.app",
   messagingSenderId: "172885729212",
 } as const;
 
 // Second database hosting the global 'Entries' presets collection
-export const GLOBAL_ENTRIES_DATABASE_ID = "ai-studio-161890da-59e3-4b8c-988c-4938de8d8e21";
+export const GLOBAL_ENTRIES_DATABASE_ID = "car-ia-photobooth";
 
 export const DEFAULT_BUCKET_GS = `gs://${FIREBASE_DEFAULTS.storageBucket}`;
 
