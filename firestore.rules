@@ -120,5 +120,13 @@ service cloud.firestore {
         || !("userId" in resource.data)
         || (isSignedIn() && resource.data.userId == request.auth.uid);
     }
+
+    // Profil / abonnement de l'utilisateur. Chacun lit UNIQUEMENT son propre document.
+    // L'écriture (champ d'abonnement 'plan' / 'entitled') est réservée au serveur
+    // (admin SDK / futur webhook Stripe) : le client ne peut pas s'auto-attribuer un abonnement.
+    match /users/{uid} {
+      allow read: if isSignedIn() && request.auth.uid == uid;
+      allow write: if false;
+    }
   }
 }
