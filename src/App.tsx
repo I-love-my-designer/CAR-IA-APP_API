@@ -323,6 +323,10 @@ export default function App() {
   const [logoSize, setLogoSize] = useState<string>("150");
   const [logoColorFill, setLogoColorFill] = useState<string>("#FF0000");
   const [logoColorFillEnabled, setLogoColorFillEnabled] = useState<boolean>(false);
+  // Recolorisation du néon du fond (transmis par la PWA, réinjecté vers le serveur).
+  const [imageColorFillEnabled, setImageColorFillEnabled] = useState<boolean>(false);
+  const [imageColorFillWalls, setImageColorFillWalls] = useState<boolean>(false);
+  const [imageColorFillTarget, setImageColorFillTarget] = useState<string>("");
   const [logoExtra, setLogoExtra] = useState<string>("");
   const [textperspective, setTextperspective] = useState<string>("");
   const [textExtra, setTextExtra] = useState<string>("");
@@ -521,6 +525,9 @@ low quality`);
   const presetsFond: PresetsFond = {
     logoAutorise,
     texteAutorise,
+    imageColorFillEnabled,
+    imageColorFillWalls,
+    imageColorFillTarget,
     logoPlaceholderCoords: {
       x: logoX,
       y: logoY,
@@ -1208,6 +1215,9 @@ Production-quality realism.`;
       const presets = job.presetsFond;
       if (presets.logoAutorise !== undefined) setLogoAutorise(presets.logoAutorise);
       if (presets.texteAutorise !== undefined) setTexteAutorise(presets.texteAutorise);
+      if (presets.imageColorFillEnabled !== undefined) setImageColorFillEnabled(Boolean(presets.imageColorFillEnabled));
+      if (presets.imageColorFillWalls !== undefined) setImageColorFillWalls(Boolean(presets.imageColorFillWalls));
+      if (presets.imageColorFillTarget !== undefined) setImageColorFillTarget(String(presets.imageColorFillTarget));
       
       const coords = presets.logoPlaceholderCoords;
       if (coords) {

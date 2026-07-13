@@ -1,6 +1,9 @@
 export interface PresetsFond {
   logoAutorise: boolean;
   texteAutorise: boolean;
+  imageColorFillEnabled?: boolean;
+  imageColorFillWalls?: boolean;
+  imageColorFillTarget?: string;
   logoPlaceholderCoords: {
     x: number;
     y: number;

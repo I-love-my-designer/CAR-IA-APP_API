@@ -1644,6 +1644,20 @@ Priority: adapt the environment to the vehicle, never adapt the vehicle to the e
         promptText += `\n\nSTYLE / ENVIRONMENT COMPOSITION STYLE:\n${prompt}`;
       }
 
+      // Recolorisation CIBLÉE du néon/LED (piloté par la table du fond, via la PWA).
+      // Dynamique : dépend de la couleur choisie → injectée ici, pas dans prompts_ia.
+      const imgColorEnabled = presetsFond?.imageColorFillEnabled === true
+        || String(presetsFond?.imageColorFillEnabled).toLowerCase() === "true";
+      // Nettoie le format (le nuancier PWA sort un hsl() à précision absurde) → hsl(295, 100%, 45%)
+      const imgColorTarget = String(presetsFond?.imageColorFillTarget || presetsFond?.imageColorFill || "").replace(/(\d+)\.\d+/g, "$1");
+      if (imgColorEnabled && imgColorTarget) {
+        const includeWalls = presetsFond?.imageColorFillWalls === true
+          || String(presetsFond?.imageColorFillWalls).toLowerCase() === "true";
+        promptText += includeWalls
+          ? `\n\nCOLOR / LIGHTING DIRECTIVE:\nRecolor the EXISTING neon/LED light strips AND the wall surfaces that already share the neon's tint to the color ${imgColorTarget} — vivid and strongly SATURATED in exactly this color (never pale), with matching glow/reflections. Keep everything else EXACTLY as in the reference image (same architecture, materials, colours and layout). Do NOT add, invent, extend or duplicate any walls, concrete, structures or objects that are not already in the reference. Do NOT apply a global colour tint.`
+          : `\n\nCOLOR / LIGHTING DIRECTIVE:\nRecolor ONLY the EXISTING neon/LED light strips and their glow/reflections to the color ${imgColorTarget} — vivid and strongly SATURATED in exactly this color (never pale). Keep everything else EXACTLY as in the reference image (same architecture, materials, colours and layout, vehicle unchanged). Do NOT add, invent, extend or duplicate any walls, concrete, structures or objects that are not already in the reference. Do NOT apply a global colour tint.`;
+      }
+
       // Resolve logo presets coordinates & details using PWA-aligned exact math
       const presetsLogoX = presetsFond?.logoPlaceholderCoords?.x !== undefined ? Number(presetsFond.logoPlaceholderCoords.x) : (req.body.logoX ? Number(req.body.logoX) / 10 : 12);
       const presetsLogoY = presetsFond?.logoPlaceholderCoords?.y !== undefined ? Number(presetsFond.logoPlaceholderCoords.y) : (req.body.logoY ? Number(req.body.logoY) / 10 : 80);
