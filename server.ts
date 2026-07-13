@@ -336,10 +336,36 @@ async function getServiceAccountToken(): Promise<string | null> {
     }
   } catch (err) {
     // Graceful error, means we are likely running locally or metadata server is not reachable
-    console.log("ℹ️ Metadata server not available. Falling back to unauthenticated download.");
+    console.log("ℹ️ Metadata server not available. Tentative de repli ADC local (gcloud)…");
   }
+
+  // Repli LOCAL (dev) : Application Default Credentials via gcloud. Inactif sur
+  // Cloud Run (le metadata server répond avant, et gcloud n'y est pas installé).
+  const adcToken = await getAdcTokenViaGcloud();
+  if (adcToken) {
+    cachedToken = adcToken;
+    tokenExpiry = Date.now() + 50 * 60 * 1000; // un jeton ADC dure ~1h
+    console.log("🔑 Jeton ADC local récupéré via gcloud (dev) — Storage + historique authentifiés.");
+    return cachedToken;
+  }
+
   tokenUnavailableUntil = Date.now() + 60_000;
   return null;
+}
+
+// Repli local : jeton d'accès via `gcloud auth application-default print-access-token`.
+// Dev uniquement (gcloud n'est pas installé sur Cloud Run, où le metadata server suffit).
+async function getAdcTokenViaGcloud(): Promise<string | null> {
+  try {
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const run = promisify(execFile);
+    const { stdout } = await run("gcloud", ["auth", "application-default", "print-access-token"], { timeout: 8000 });
+    const token = stdout.trim();
+    return token || null;
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------

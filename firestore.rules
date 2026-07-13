@@ -102,7 +102,12 @@ service cloud.firestore {
     // Règles pour la collection 'entries' (Minuscule)
     match /entries/{entryId} {
       allow read, get, list: if true;
-      allow create, update: if isValidId(entryId) && isValidEntry(incoming());
+      // Écriture par le propriétaire (éditeur Sheetsync). Le schéma des tables évolue
+      // (logoX/Y, textX/Y, resolutionRef, promptIA, *ColorFillEnabled, *Prompt…), donc on
+      // valide par propriété + taille bornée plutôt que par une liste de champs figée.
+      allow create, update: if isValidId(entryId) && isSignedIn()
+        && incoming().userId == request.auth.uid
+        && incoming().keys().size() <= 45;
       // Une entrée anonyme (sans userId) reste supprimable par tous ;
       // une entrée possédée ne peut être supprimée que par son propriétaire.
       allow delete: if resource == null
@@ -113,7 +118,12 @@ service cloud.firestore {
     // Règles pour la collection 'Entries' (Majuscule - AJOUTÉ pour résoudre l'erreur)
     match /Entries/{entryId} {
       allow read, get, list: if true;
-      allow create, update: if isValidId(entryId) && isValidEntry(incoming());
+      // Écriture par le propriétaire (éditeur Sheetsync). Le schéma des tables évolue
+      // (logoX/Y, textX/Y, resolutionRef, promptIA, *ColorFillEnabled, *Prompt…), donc on
+      // valide par propriété + taille bornée plutôt que par une liste de champs figée.
+      allow create, update: if isValidId(entryId) && isSignedIn()
+        && incoming().userId == request.auth.uid
+        && incoming().keys().size() <= 45;
       // Une entrée anonyme (sans userId) reste supprimable par tous ;
       // une entrée possédée ne peut être supprimée que par son propriétaire.
       allow delete: if resource == null
@@ -127,6 +137,20 @@ service cloud.firestore {
     match /users/{uid} {
       allow read: if isSignedIn() && request.auth.uid == uid;
       allow write: if false;
+    }
+
+    // Historique des générations — chacun lit UNIQUEMENT les siennes (filtre userId).
+    // Écrit par le serveur/moteur (accès admin) : le client est en lecture seule.
+    match /generations_history/{docId} {
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow write: if false;
+    }
+
+    // Brand Kit d'un utilisateur (logo + couleur + slogan). Lecture ET écriture
+    // réservées au propriétaire — c'est SON contenu, il le gère depuis la PWA.
+    match /brand_kits/{uid} {
+      allow read, write: if isSignedIn() && request.auth.uid == uid
+        && incoming().keys().size() <= 15;
     }
   }
 }
