@@ -322,7 +322,7 @@ async function getServiceAccountToken(): Promise<string | null> {
     try {
       const controller = new AbortController();
       const id = setTimeout(() => controller.abort(), 3000);
-      const res = await fetch(`http://${host}/computeMetadata/v1/instance/service-account/default/token`, {
+      const res = await fetch(`http://${host}/computeMetadata/v1/instance/service-accounts/default/token`, {
         headers: { "Metadata-Flavor": "Google" },
         signal: controller.signal,
       });
