@@ -2271,7 +2271,9 @@ async function orchestratorTick(): Promise<void> {
           userId: data.userId || "user_test_99",
           prompt: data.prompt || data.unifiedInstruction || "",
           model: data.model,
-          aspectRatio: data.aspectRatio,
+          // La PWA n'écrit pas d'aspectRatio ; l'IMAGE_C est carrée (resolutionRef 1280)
+          // → défaut 1:1 (sinon l'endpoint retombe sur 16:9 = sortie large).
+          aspectRatio: data.aspectRatio || "1:1",
           imageSize: data.imageSize,
           imageA: data.imageA,
           imageB: data.imageB,
@@ -2279,6 +2281,9 @@ async function orchestratorTick(): Promise<void> {
           logo: data.logo || undefined,
           metadataUtilisateur: meta,
           presetsFond: data.presetsFond,
+          // ⬇️ Indispensables pour incruster logo/texte en post-prod (mode overlay).
+          brandingMode: data.brandingMode || "overlay",
+          brandingOverlay: data.brandingOverlay,
           W_B: data.W_B || meta.W_B,
           H_B: data.H_B || meta.H_B,
           text: !!meta.texte,
