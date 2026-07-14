@@ -315,28 +315,32 @@ async function getServiceAccountToken(): Promise<string | null> {
   if (now < tokenUnavailableUntil) {
     return null;
   }
-  try {
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 1200); // 1.2s timeout for metadata server
-
-    const res = await fetch("http://metadata.google.internal/computeMetadata/v1/instance/service-account/default/token", {
-      headers: { "Metadata-Flavor": "Google" },
-      signal: controller.signal
-    });
-    clearTimeout(id);
-
-    if (res.ok) {
-      const data: any = await res.json();
-      if (data.access_token) {
-        cachedToken = data.access_token;
-        tokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
-        console.log("🔑 Successfully retrieved service account token from metadata server.");
-        return cachedToken;
+  // Sur Cloud Run, le jeton vient du metadata server. On tente le nom DNS puis l'IP
+  // link-local (contourne d'éventuels soucis de résolution DNS via undici), avec un
+  // timeout confortable. On loggue la vraie erreur pour diagnostiquer.
+  for (const host of ["metadata.google.internal", "169.254.169.254"]) {
+    try {
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), 3000);
+      const res = await fetch(`http://${host}/computeMetadata/v1/instance/service-account/default/token`, {
+        headers: { "Metadata-Flavor": "Google" },
+        signal: controller.signal,
+      });
+      clearTimeout(id);
+      if (res.ok) {
+        const data: any = await res.json();
+        if (data.access_token) {
+          cachedToken = data.access_token;
+          tokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
+          console.log(`🔑 Jeton service-account obtenu via ${host}.`);
+          return cachedToken;
+        }
+      } else {
+        console.log(`ℹ️ Metadata ${host} → HTTP ${res.status}`);
       }
+    } catch (err: any) {
+      console.log(`ℹ️ Metadata ${host} KO: ${err?.name || err?.message || err}`);
     }
-  } catch (err) {
-    // Graceful error, means we are likely running locally or metadata server is not reachable
-    console.log("ℹ️ Metadata server not available. Tentative de repli ADC local (gcloud)…");
   }
 
   // Repli LOCAL (dev) : Application Default Credentials via gcloud. Inactif sur
