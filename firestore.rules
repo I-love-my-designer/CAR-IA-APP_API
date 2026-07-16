@@ -157,13 +157,15 @@ service cloud.firestore {
         && incoming().keys().size() <= 15;
     }
 
-    // Favoris d'environnements d'un utilisateur (max 10). Lecture ET écriture réservées
-    // au propriétaire ; le tableau `items` est borné à 10 entrées.
+    // Favoris d'un utilisateur (même doc) : `items` = fonds favoris (max 10),
+    // `annonces` = IDs d'annonces générées épinglées (max 5). Lecture ET écriture
+    // réservées au propriétaire.
     match /favorites/{uid} {
       allow read: if isSignedIn() && request.auth.uid == uid;
       allow write: if isSignedIn() && request.auth.uid == uid
-        && incoming().keys().size() <= 3
-        && (!('items' in incoming()) || (incoming().items is list && incoming().items.size() <= 10));
+        && incoming().keys().size() <= 4
+        && (!('items' in incoming()) || (incoming().items is list && incoming().items.size() <= 10))
+        && (!('annonces' in incoming()) || (incoming().annonces is list && incoming().annonces.size() <= 5));
     }
   }
 }
