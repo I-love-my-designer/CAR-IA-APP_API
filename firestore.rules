@@ -156,5 +156,14 @@ service cloud.firestore {
       allow write: if isSignedIn() && request.auth.uid == uid
         && incoming().keys().size() <= 15;
     }
+
+    // Favoris d'environnements d'un utilisateur (max 10). Lecture ET écriture réservées
+    // au propriétaire ; le tableau `items` est borné à 10 entrées.
+    match /favorites/{uid} {
+      allow read: if isSignedIn() && request.auth.uid == uid;
+      allow write: if isSignedIn() && request.auth.uid == uid
+        && incoming().keys().size() <= 3
+        && (!('items' in incoming()) || (incoming().items is list && incoming().items.size() <= 10));
+    }
   }
 }
