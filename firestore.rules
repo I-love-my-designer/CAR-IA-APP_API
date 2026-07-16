@@ -149,7 +149,11 @@ service cloud.firestore {
     // Brand Kit d'un utilisateur (logo + couleur + slogan). Lecture ET écriture
     // réservées au propriétaire — c'est SON contenu, il le gère depuis la PWA.
     match /brand_kits/{uid} {
-      allow read, write: if isSignedIn() && request.auth.uid == uid
+      // Lecture : le propriétaire lit son kit (PAS de incoming() ici — il est null en lecture,
+      // ce qui refusait la lecture et vidait le modal à sa réouverture).
+      allow read: if isSignedIn() && request.auth.uid == uid;
+      // Écriture : propriétaire + taille bornée.
+      allow write: if isSignedIn() && request.auth.uid == uid
         && incoming().keys().size() <= 15;
     }
   }
