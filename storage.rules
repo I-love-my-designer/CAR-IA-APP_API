@@ -24,6 +24,8 @@ service firebase.storage {
     // -------------------------------------------------------------------
     // Utilisés par la PWA
     match /ENVIRONMENTS/{allPaths=**} { allow read, list: if true; }
+    // Studio CUSTOM : fonds d'exemple, sols et parties hautes (remplis par l'admin)
+    match /CUSTOM/{allPaths=**} { allow read, list: if true; }
     match /LOGOS/{allPaths=**} { allow read, list: if true; }
     match /logos/{allPaths=**} { allow read, list: if true; }
     match /MARQUES/{allPaths=**} { allow read, list: if true; }

@@ -2335,6 +2335,112 @@ async function orchestratorTick(): Promise<void> {
 async function startServer() {
   ensureLocalTestFilesExist();
   // Vite middleware for development (imported lazily so the production bundle never loads Vite)
+  // =====================================================================
+  // STUDIO CUSTOM — génération d'un FOND personnalisé (sans véhicule).
+  // Produit un décor premium (moitié basse = sol, horizon centré, plein jour),
+  // éventuellement recoloré, avec le logo intégré DANS un matériau du décor.
+  // Renvoie l'image en data URL ; la PWA l'enregistre ensuite dans Storage.
+  // =====================================================================
+  app.post("/api/gemini/generate-background", requireApiSecret, rateLimit(6), async (req, res) => {
+    try {
+      const { baseImage, groundImage, topImage, color, logo, logoMaterialPrompt, extraPrompt } = req.body || {};
+      if (!baseImage && !groundImage && !topImage) {
+        return res.status(400).json({ success: false, error: "Aucune image de référence fournie." });
+      }
+
+      const encode = async (url: string, name: string) => {
+        if (!url) return null;
+        let target = String(url).trim();
+        if (target.startsWith("data:")) {
+          const m = target.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+          if (m && m[2]) return { inlineData: { data: m[2], mimeType: m[1] || "image/jpeg" } };
+          throw new Error(`${name}: data URL invalide.`);
+        }
+        if (target.startsWith("gs://")) {
+          const s = target.slice(5);
+          const i = s.indexOf("/");
+          if (i !== -1) target = `https://firebasestorage.googleapis.com/v0/b/${s.slice(0, i)}/o/${encodeURIComponent(s.slice(i + 1))}?alt=media`;
+        }
+        const r = await fetch(target);
+        if (!r.ok) throw new Error(`${name}: téléchargement échoué (${r.status}).`);
+        const buf = Buffer.from(await r.arrayBuffer());
+        const mime = detectMimeType(buf) || "image/jpeg";
+        return { inlineData: { data: buf.toString("base64"), mimeType: mime } };
+      };
+
+      const parts: any[] = [];
+      const refs: Array<[string, string]> = [];
+      if (baseImage) refs.push([baseImage, "IMAGE_BASE (décor de référence à réinterpréter)"]);
+      if (groundImage) refs.push([groundImage, "IMAGE_SOL (sol / moitié basse à utiliser)"]);
+      if (topImage) refs.push([topImage, "IMAGE_FOND (partie haute / horizon à utiliser)"]);
+      if (logo) refs.push([logo, "IMAGE_LOGO (logo à intégrer dans un matériau du décor)"]);
+      for (const [u, label] of refs) {
+        const enc = await encode(u, label);
+        if (enc) { parts.push({ text: label }); parts.push(enc); }
+      }
+
+      let prompt =
+        "Create a PREMIUM, photorealistic EMPTY background scene for an automotive photoshoot. " +
+        "STRICT COMPOSITION: the lower half is the GROUND (the surface a car will later stand on); " +
+        "the horizon sits at the vertical center or slightly above; low camera angle at car height; " +
+        "DAYTIME, bright and clean; NO road/street, NO vehicle, NO people, NO overlay text, NO watermark. " +
+        "Keep the central area clear so a car can be composited later.";
+      if (groundImage || topImage) {
+        prompt += " Build the scene by COMBINING the references: IMAGE_SOL as the ground/lower half and IMAGE_FOND as the upper background/horizon, blended into one coherent environment with matching light and perspective.";
+      } else if (baseImage) {
+        prompt += " Re-interpret IMAGE_BASE into a refined, coherent premium version, preserving its overall layout (ground below, background above).";
+      }
+      if (color && /^#?[0-9a-fA-F]{6}$/.test(String(color))) {
+        const hex = String(color).startsWith("#") ? color : `#${color}`;
+        prompt += ` COLOR MOOD: subtly grade the ambient accents, lighting and any neon/LED elements toward ${hex}, keeping the scene natural (do not flood everything with this colour).`;
+      }
+      if (logo) {
+        const mat = (logoMaterialPrompt && String(logoMaterialPrompt).trim())
+          ? String(logoMaterialPrompt).trim()
+          : "integrate the provided logo NATURALLY into a material/surface of the scene (brushed metal panel, concrete wall, frosted glass or a backlit sign), as if physically printed, etched or embossed — realistic scale, perspective and lighting, subtle and elegant, NOT a flat sticker overlay";
+        prompt += ` LOGO INTEGRATION: ${mat}. Place it discreetly (e.g. on an upper-background wall), never covering the central area reserved for the car.`;
+      }
+      if (extraPrompt && String(extraPrompt).trim()) {
+        prompt += ` ADDITIONAL DIRECTION: ${String(extraPrompt).trim()}`;
+      }
+      parts.push({ text: prompt });
+
+      const ai = new GoogleGenAI({
+        apiKey: GEMINI_API_KEY,
+        httpOptions: { headers: { "User-Agent": "aistudio-build" } },
+      });
+      const apiResponse = await ai.models.generateContent({
+        model: DEFAULT_GEMINI_MODEL,
+        contents: [{ role: "user", parts }],
+        config: {
+          imageConfig: { aspectRatio: "1:1" },
+          systemInstruction:
+            "You are a professional environment/set designer and automotive retoucher. " +
+            "Produce a clean, empty, photorealistic background scene following the composition rules exactly. " +
+            "Never add a vehicle, people, or overlay text.",
+        },
+      });
+
+      let imageResult: string | null = null;
+      for (const c of apiResponse.candidates || []) {
+        for (const p of c.content?.parts || []) {
+          if (p.inlineData?.data) {
+            imageResult = `data:${p.inlineData.mimeType || "image/png"};base64,${p.inlineData.data}`;
+            break;
+          }
+        }
+        if (imageResult) break;
+      }
+      if (!imageResult) {
+        return res.status(502).json({ success: false, error: "Gemini n'a renvoyé aucune image." });
+      }
+      return res.json({ success: true, image: imageResult });
+    } catch (err: any) {
+      console.error("[GENERATE-BACKGROUND] échec:", err);
+      return res.status(500).json({ success: false, error: err?.message || "Erreur de génération du fond." });
+    }
+  });
+
   if (process.env.NODE_ENV !== "production") {
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({

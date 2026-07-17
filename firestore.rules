@@ -167,5 +167,14 @@ service cloud.firestore {
         && (!('items' in incoming()) || (incoming().items is list && incoming().items.size() <= 10))
         && (!('annonces' in incoming()) || (incoming().annonces is list && incoming().annonces.size() <= 5));
     }
+
+    // Fonds générés par le studio CUSTOM. Chaque fiche appartient à son créateur
+    // (champ userId). Lecture/suppression par le propriétaire ; création bornée.
+    match /custom_backgrounds/{bgId} {
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && incoming().userId == request.auth.uid
+        && incoming().keys().size() <= 6;
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
   }
 }
