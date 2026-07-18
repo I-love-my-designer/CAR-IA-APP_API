@@ -1415,9 +1415,9 @@ const [partA, partB, partC, partLogo] = await Promise.all([
   rawPartLogo ? flattenImageIfNeeded(rawPartLogo, "Logo de marque", stepsLogs, true) : Promise.resolve(null)
 ]);
 
-// All 3 images will be utilized, except for gemini-3-pro-image where we only send the spatial guide (IMAGE_C)
+// All 3 images are utilized for EVERY model (3 Pro included — see SDK-PREP below).
 const isGemini3ProImage = activeModel && activeModel.includes("3-pro-image");
-const imageCountUsed = (isGemini3ProImage ? 1 : 3) + (partLogo ? 1 : 0);
+const imageCountUsed = 3 + (partLogo ? 1 : 0);
 imageTokensCount = imageCountUsed * 258;
 promptTokensCount = (prompt || "").length + 250;
 totalInputTokens = promptTokensCount + imageTokensCount;
@@ -1558,33 +1558,26 @@ const parts: any[] = [];
 //    (relief/engraving), so we keep the descriptive placement directives.
 stepsLogs.push(`🏷️ [BRANDING] Mode : '${brandingMode}' (${brandingMode === "overlay" ? "logo/texte en post-prod" : "logo/texte générés dans la scène"}).`);
 
-if (isGemini3ProImage) {
-  stepsLogs.push(
-    `🎯 [SDK-PREP] Modèle Gemini 3 Pro-image détecté. Passage de l'IMAGE_C (composition finale) uniquement.`
-  );
-  if (partC) {
-    parts.push({ text: "[IMAGE_C - FINAL COMPOSITION REFERENCE]" });
-    parts.push(partC);
-  }
-} else {
-  stepsLogs.push(
-    `🎯 [SDK-PREP] Modèle Gemini classique ('${activeModel}'). Passage des 3 images : IMAGE_A (fond), IMAGE_B (véhicule), IMAGE_C (composition).`
-  );
+// TOUS les modèles (3 Pro inclus) reçoivent les 3 images. Avant, le 3 Pro ne
+// recevait que l'IMAGE_C (guide spatial) : sans le fond propre (IMAGE_A) il
+// « réinventait » un décor au lieu de reproduire l'environnement choisi.
+stepsLogs.push(
+  `🎯 [SDK-PREP] Modèle '${activeModel}'. Passage des 3 images : IMAGE_A (fond), IMAGE_B (véhicule), IMAGE_C (composition).`
+);
 
-  if (partA) {
-    parts.push({ text: "[IMAGE_A - BACKGROUND ENVIRONMENT]" });
-    parts.push(partA);
-  }
+if (partA) {
+  parts.push({ text: "[IMAGE_A - BACKGROUND ENVIRONMENT]" });
+  parts.push(partA);
+}
 
-  if (partB) {
-    parts.push({ text: "[IMAGE_B - VEHICLE REFERENCE]" });
-    parts.push(partB);
-  }
+if (partB) {
+  parts.push({ text: "[IMAGE_B - VEHICLE REFERENCE]" });
+  parts.push(partB);
+}
 
-  if (partC) {
-    parts.push({ text: "[IMAGE_C - FINAL COMPOSITION REFERENCE]" });
-    parts.push(partC);
-  }
+if (partC) {
+  parts.push({ text: "[IMAGE_C - FINAL COMPOSITION REFERENCE]" });
+  parts.push(partC);
 }
 
 // In "integrated" mode the model needs the logo image to render it into the
@@ -1660,6 +1653,15 @@ Priority: adapt the environment to the vehicle, never adapt the vehicle to the e
         promptText += includeWalls
           ? `\n\nMINOR NEON COLOUR NOTE (this must NOT change the composition in any way): the vehicle stays the main subject in the foreground, exactly at the position, size and 3/4 angle of the reference IMAGE_C, and the scene/architecture is unchanged. The ONLY change is the hue of the already-present neon/LED strips (and the walls that already share their tint): make them glow a vivid, saturated ${imgColorTarget}, with matching reflections. Do not restyle anything, do not add or remove structures, do not tint the whole image.`
           : `\n\nMINOR NEON COLOUR NOTE (this must NOT change the composition in any way): the vehicle stays the main subject in the foreground, exactly at the position, size and 3/4 angle of the reference IMAGE_C, and the scene/architecture is unchanged. The ONLY change is the hue of the already-present neon/LED strips: make them glow a vivid, saturated ${imgColorTarget}, with matching reflections. Do not restyle anything, do not add or remove structures, do not tint the whole image.`;
+      }
+
+      // Réflexion du véhicule sur le sol (pilotée par la table SheetSync du
+      // fond, via presetsFond.groundReflection : 'none' | 'light' | 'mirror').
+      const groundReflection = String(presetsFond?.groundReflection || "none").toLowerCase();
+      if (groundReflection === "light") {
+        promptText += `\n\nGROUND REFLECTION NOTE (must NOT change the composition): add a SUBTLE, soft, realistic reflection of the vehicle on the ground surface directly beneath it — low opacity, slightly diffused, fading with distance, consistent with the scene lighting. Do not turn the ground into a mirror; keep its original material and texture visible through the faint reflection.`;
+      } else if (groundReflection === "mirror") {
+        promptText += `\n\nGROUND REFLECTION NOTE (must NOT change the composition): render the ground as a POLISHED, showroom-grade reflective surface with a clear mirror-like reflection of the vehicle beneath it, sharp near the contact points and gently softening with distance, consistent with the scene lighting. Keep the ground's original colour/material readable; do not alter the rest of the scene.`;
       }
 
       // Resolve logo presets coordinates & details using PWA-aligned exact math
@@ -2197,7 +2199,9 @@ function ensureLocalTestFilesExist() {
 // (and double the Gemini spend) — enable one or the other, not both.
 // ---------------------------------------------------------------------------
 const ORCHESTRATION_ENABLED = process.env.SERVER_ORCHESTRATION === "true";
-const ORCHESTRATION_POLL_MS = Math.max(5000, Number(process.env.SERVER_ORCHESTRATION_POLL_MS || 15000));
+// 5s par défaut (au lieu de 15s) : c'est la latence d'attente moyenne perçue par
+// l'utilisateur entre « Generate Masterpiece » et la prise en charge du job.
+const ORCHESTRATION_POLL_MS = Math.max(5000, Number(process.env.SERVER_ORCHESTRATION_POLL_MS || 5000));
 let orchestratorBusy = false;
 
 async function claimExportJob(docId: string, updateTime: string): Promise<boolean> {
@@ -2257,78 +2261,89 @@ async function orchestratorTick(): Promise<void> {
     });
     if (!rows) return;
 
+    // Réclamation séquentielle (atomique via updateTime), puis traitement DÉTACHÉ
+    // en parallèle. Avant, la boucle attendait chaque génération (~20-60s) avant
+    // de passer au job suivant, et `orchestratorBusy` bloquait les ticks pendant
+    // ce temps : en mode « 2 MODELS » le rendu Flash pouvait attendre la fin du
+    // rendu 3 Pro, et toute génération lancée pendant une autre patientait aussi.
+    // Un job réclamé passe en `processing`, donc les ticks suivants ne le
+    // reprennent pas — le détachement est sûr. La concurrence reste bornée par
+    // `limit: 3` par tick.
     for (const row of rows) {
       if (!row.document) continue;
       const { id, updateTime, data } = decodeFirestoreDoc(row.document);
       if (!data.imageA || !data.imageB || !data.imageC) continue; // inputs not ready yet
       if (!(await claimExportJob(id, updateTime))) continue;
       console.log(`🤖 [ORCHESTRATOR] Job '${id}' réclamé, génération en cours...`);
-
-      try {
-        const meta = data.metadataUtilisateur || {};
-        const payload = {
-          jobId: id,
-          userId: data.userId || "user_test_99",
-          prompt: data.prompt || data.unifiedInstruction || "",
-          model: data.model,
-          // La PWA n'écrit pas d'aspectRatio ; l'IMAGE_C est carrée (resolutionRef 1280)
-          // → défaut 1:1 (sinon l'endpoint retombe sur 16:9 = sortie large).
-          aspectRatio: data.aspectRatio || "1:1",
-          imageSize: data.imageSize,
-          imageA: data.imageA,
-          imageB: data.imageB,
-          imageC: data.imageC,
-          logo: data.logo || undefined,
-          metadataUtilisateur: meta,
-          presetsFond: data.presetsFond,
-          // ⬇️ Indispensables pour incruster logo/texte en post-prod (mode overlay).
-          brandingMode: data.brandingMode || "overlay",
-          brandingOverlay: data.brandingOverlay,
-          W_B: data.W_B || meta.W_B,
-          H_B: data.H_B || meta.H_B,
-          text: !!meta.texte,
-          textContent: meta.texte || "",
-          geometryGuidanceMode: data.geometryGuidanceMode,
-          coordinatePromptMode: data.coordinatePromptMode,
-        };
-
-        // Reuse the full generation pipeline by calling our own endpoint locally
-        const headers: Record<string, string> = { "Content-Type": "application/json" };
-        if (API_SHARED_SECRET) headers["x-api-key"] = API_SHARED_SECRET;
-        const genRes = await fetch(`http://127.0.0.1:${PORT}/api/gemini/generate`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify(payload),
-        });
-        const genJson: any = await genRes.json();
-
-        if (genRes.ok && genJson.success && genJson.imageUrl) {
-          await patchExportJob(id, {
-            status: "completed",
-            progress: 100,
-            imageFinal: genJson.imageUrl,
-            url: genJson.imageUrl,
-            completedAt: new Date().toISOString(),
-          });
-          console.log(`✅ [ORCHESTRATOR] Job '${id}' terminé : ${String(genJson.imageUrl).slice(0, 80)}...`);
-        } else {
-          const reason = String(genJson.apiError || `HTTP ${genRes.status}`);
-          await patchExportJob(id, { status: "failed", errorMessage5: reason });
-          console.warn(`❌ [ORCHESTRATOR] Job '${id}' en échec : ${reason}`);
-        }
-      } catch (err: any) {
-        console.error(`❌ [ORCHESTRATOR] Erreur sur le job '${id}' :`, err);
-        try {
-          await patchExportJob(id, { status: "failed", errorMessage5: err.message || String(err) });
-        } catch {
-          // job left in "processing"; it will need a manual retry
-        }
-      }
+      void processClaimedExportJob(id, data);
     }
   } catch (err) {
     console.warn("⚠️ [ORCHESTRATOR] Tick en échec :", err);
   } finally {
     orchestratorBusy = false;
+  }
+}
+
+async function processClaimedExportJob(id: string, data: any): Promise<void> {
+  try {
+    const meta = data.metadataUtilisateur || {};
+    const payload = {
+      jobId: id,
+      userId: data.userId || "user_test_99",
+      prompt: data.prompt || data.unifiedInstruction || "",
+      model: data.model,
+      // La PWA n'écrit pas d'aspectRatio ; l'IMAGE_C est carrée (resolutionRef 1280)
+      // → défaut 1:1 (sinon l'endpoint retombe sur 16:9 = sortie large).
+      aspectRatio: data.aspectRatio || "1:1",
+      imageSize: data.imageSize,
+      imageA: data.imageA,
+      imageB: data.imageB,
+      imageC: data.imageC,
+      logo: data.logo || undefined,
+      metadataUtilisateur: meta,
+      presetsFond: data.presetsFond,
+      // ⬇️ Indispensables pour incruster logo/texte en post-prod (mode overlay).
+      brandingMode: data.brandingMode || "overlay",
+      brandingOverlay: data.brandingOverlay,
+      W_B: data.W_B || meta.W_B,
+      H_B: data.H_B || meta.H_B,
+      text: !!meta.texte,
+      textContent: meta.texte || "",
+      geometryGuidanceMode: data.geometryGuidanceMode,
+      coordinatePromptMode: data.coordinatePromptMode,
+    };
+
+    // Reuse the full generation pipeline by calling our own endpoint locally
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (API_SHARED_SECRET) headers["x-api-key"] = API_SHARED_SECRET;
+    const genRes = await fetch(`http://127.0.0.1:${PORT}/api/gemini/generate`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    });
+    const genJson: any = await genRes.json();
+
+    if (genRes.ok && genJson.success && genJson.imageUrl) {
+      await patchExportJob(id, {
+        status: "completed",
+        progress: 100,
+        imageFinal: genJson.imageUrl,
+        url: genJson.imageUrl,
+        completedAt: new Date().toISOString(),
+      });
+      console.log(`✅ [ORCHESTRATOR] Job '${id}' terminé : ${String(genJson.imageUrl).slice(0, 80)}...`);
+    } else {
+      const reason = String(genJson.apiError || `HTTP ${genRes.status}`);
+      await patchExportJob(id, { status: "failed", errorMessage5: reason });
+      console.warn(`❌ [ORCHESTRATOR] Job '${id}' en échec : ${reason}`);
+    }
+  } catch (err: any) {
+    console.error(`❌ [ORCHESTRATOR] Erreur sur le job '${id}' :`, err);
+    try {
+      await patchExportJob(id, { status: "failed", errorMessage5: err.message || String(err) });
+    } catch {
+      // job left in "processing"; it will need a manual retry
+    }
   }
 }
 
